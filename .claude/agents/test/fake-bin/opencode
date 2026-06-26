@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Fake opencode CLI for cheap-coder tests.
+#
+# Behavior is driven by env vars set by the test case:
+#   FAKE_OPENCODE_SCRIPT       - path to a bash script that mutates the working tree
+#                                (run with cwd = the --dir argument).
+#   FAKE_OPENCODE_SUMMARY      - the assistant summary text emitted as the final
+#                                JSONL `text` event. Default: "did the work".
+#   FAKE_OPENCODE_ERROR        - if set, emit a JSONL `error` event with this
+#                                message before the summary.
+#   FAKE_OPENCODE_EXIT_CODE    - exit code to return. Default: 0.
+#   FAKE_OPENCODE_EMIT_NOTHING - if set to 1, emit no JSONL at all (simulates
+#                                a crash before output).
+#   FAKE_OPENCODE_SESSION_ID   - session id stamped on every emitted event as
+#                                "sessionID":"<id>". Default: ses_FAKE0001.
+#   FAKE_OPENCODE_ARGV_LOG     - if set, the fake records what it received here:
+#                                  SESSION=<value of --session, empty if absent>
+#                                  MESSAGE_BEGIN
+#                                  <the positional task/message argument>
+#                                  MESSAGE_END
+#                                so a case can assert --session passthrough and
+#                                that the RESUME-SESSION header was stripped.
+#
+# Args read: --dir, --session, and the positional message. Others (run,
+# --format, -m/--model) are consumed/ignored, matching cheap-coder's usage:
+#   opencode run --dir <dir> --format json [--session <id>] "<task>"
+
+set -e
+
+DIR=""
+SESSION_ARG=""
+MESSAGE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dir)
+      DIR=$2
+      shift 2
+      ;;
+    --session)
+      SESSION_ARG=$2
+      shift 2
+      ;;
+    --format|-m|--model)
+      shift 2
+      ;;
+    run)
+      shift
+      ;;
+    *)
+      MESSAGE=$1
+      shift
+      ;;
+  esac
+done
+
+if [ -z "$DIR" ]; then
+  echo "fake-opencode: --dir not provided" >&2
+  exit 2
+fi
+
+# Record what we were invoked with, for cases that assert on --session
+# passthrough and RESUME-SESSION header stripping. Written to a path OUTSIDE
+# $DIR so it never pollutes cheap-coder's untracked-file discovery.
+if [ -n "${FAKE_OPENCODE_ARGV_LOG:-}" ]; then
+  {
+    printf 'SESSION=%s\n' "$SESSION_ARG"
+    printf 'MESSAGE_BEGIN\n'
+    printf '%s\n' "$MESSAGE"
+    printf 'MESSAGE_END\n'
+  } > "$FAKE_OPENCODE_ARGV_LOG"
+fi
+
+# Run the prescribed mutation script in the target dir.
+if [ -n "$FAKE_OPENCODE_SCRIPT" ] && [ -f "$FAKE_OPENCODE_SCRIPT" ]; then
+  ( cd "$DIR" && bash "$FAKE_OPENCODE_SCRIPT" )
+fi
+
+# Emit prescribed JSONL events. Every event carries "sessionID" at the top
+# level, mirroring real opencode (cheap-coder greps the first one to surface
+# the resumable session id). The padding events also push the stream past the
+# 100-byte "unusually small output" anomaly threshold.
+if [ "$FAKE_OPENCODE_EMIT_NOTHING" != "1" ]; then
+  SID=${FAKE_OPENCODE_SESSION_ID:-ses_FAKE0001}
+  printf '{"sessionID":"%s","type":"status","status":"running"}\n' "$SID"
+  printf '{"sessionID":"%s","type":"tool_use","tool":"edit","status":"complete"}\n' "$SID"
+  if [ -n "$FAKE_OPENCODE_ERROR" ]; then
+    # Match the schema cheap-coder's jq filter expects:
+    #   select(.type=="error") | .error.name + ": " + .error.data.message
+    printf '{"sessionID":"%s","type":"error","error":{"name":"ToolError","data":{"message":%s}}}\n' \
+      "$SID" \
+      "$(printf '%s' "$FAKE_OPENCODE_ERROR" | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0,"utf8")))')"
+  fi
+
+  SUMMARY=${FAKE_OPENCODE_SUMMARY:-"did the work"}
+  # Match schema cheap-coder's jq filter expects:
+  #   select(.type=="text") | .part.text
+  printf '{"sessionID":"%s","type":"text","part":{"text":%s}}\n' \
+    "$SID" \
+    "$(printf '%s' "$SUMMARY" | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0,"utf8")))')"
+fi
+
+exit "${FAKE_OPENCODE_EXIT_CODE:-0}"

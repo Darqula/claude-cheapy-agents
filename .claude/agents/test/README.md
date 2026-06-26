@@ -1,0 +1,71 @@
+# cheap-coder test harness
+
+Runnable test suite for the [cheap-coder](../cheap-coder.md) subagent. Exercises the actual bash template extracted from the agent .md file, against a fake opencode CLI that simulates prescribed behavior.
+
+## Usage
+
+```bash
+.claude/agents/test/run-tests.sh           # run all cases
+.claude/agents/test/run-tests.sh 03-add-untracked-nested   # run one case
+```
+
+A passing run prints `PASS` per case and exits 0. Failures print the assertions that failed and the path to the case's captured stdout, then exit 1.
+
+## What gets tested
+
+Each test creates a fresh throwaway git repo via [fixtures/setup-clean-repo.sh](fixtures/setup-clean-repo.sh), optionally applies a prestate (e.g. a pre-existing untracked file), runs the cheap-coder bash template against a fake opencode that mutates the working tree, and asserts against the structured stdout.
+
+Production opencode is never invoked. Tests are deterministic and offline.
+
+## How extraction works
+
+The agent .md contains the bash template in a single fenced `` ```bash `` block. [extract-template.sh](extract-template.sh) pulls out that block and substitutes `{{PARENT_TASK_QUOTED}}` with a single-quote-escaped task string via [substitute.js](substitute.js) (Node — used because awk/sed both have replacement-string backslash-handling quirks that corrupt `'\''`). The result is a runnable bash script identical to what the production subagent executes.
+
+## Fake binaries
+
+[fake-bin/opencode](fake-bin/opencode) is placed first on `PATH` when running cheap-coder. The fake opencode reads behavior from env vars set by the test case:
+
+- `FAKE_OPENCODE_SCRIPT` — path to a script that mutates the working tree
+- `FAKE_OPENCODE_SUMMARY` — the assistant summary text (default: "did the work")
+- `FAKE_OPENCODE_ERROR` — if set, emit a JSONL error event before the summary
+- `FAKE_OPENCODE_EXIT_CODE` — exit code to return (default: 0)
+- `FAKE_OPENCODE_EMIT_NOTHING` — if `1`, emit no JSONL events
+- `FAKE_OPENCODE_SESSION_ID` — session id stamped on every event (default: `ses_FAKE0001`)
+- `FAKE_OPENCODE_ARGV_LOG` — set by the runner (not the case) to a path where the fake records the `--session` value and the message it received; a case's `assert()` reads it via the same `$FAKE_OPENCODE_ARGV_LOG` var to verify `--session` passthrough and `RESUME-SESSION` header stripping
+
+`jq` is **not** faked — the tests run against the real `jq` binary, the same one cheap-coder requires in production. (A Node-based jq shim was bundled here previously so tests could run without `jq` installed; it was removed once real `jq` became a standard prerequisite.)
+
+## Writing a new case
+
+A case is a bash file in [cases/](cases/) defining some of:
+
+```bash
+TASK="what to ask cheap-coder to do"          # task string passed to cheap-coder
+
+prestate() {                                   # optional
+  local repo=$1
+  # apply state BEFORE cheap-coder runs (pre-existing files, etc.)
+}
+
+opencode_script() {                            # the fake opencode runs this in $REPO
+  # mutate the working tree as if opencode did the work
+}
+
+EXTRA_SETUP="cd src/components"                # optional shell to run before cheap-coder
+
+assert() {                                     # check the captured stdout
+  local out=$1
+  grep -q 'expected text' "$out" || echo "FAIL: reason"
+  echo "PASS"
+}
+```
+
+Per-case env vars (`FAKE_OPENCODE_SUMMARY` etc.) are exported automatically.
+
+The case file is sourced inside a subshell, so cross-case state cannot leak.
+
+## Prerequisites
+
+- bash, git, jq, node (node is only for substitute.js)
+
+The tests use the real `jq` binary — the same prerequisite cheap-coder enforces in production via its own precondition check.
