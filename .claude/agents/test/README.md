@@ -1,6 +1,6 @@
 # cheap-coder test harness
 
-Runnable test suite for the [cheap-coder](../cheap-coder.md) subagent. Exercises the actual bash template extracted from the agent .md file, against a fake opencode CLI that simulates prescribed behavior.
+Runnable test suite for the [cheap-coder](../cheap-coder.md) subagent. Exercises the actual shipped engine script ([../lib/cheap-coder-run.sh](../lib/cheap-coder-run.sh)) against a fake opencode CLI that simulates prescribed behavior.
 
 ## Usage
 
@@ -13,13 +13,13 @@ A passing run prints `PASS` per case and exits 0. Failures print the assertions 
 
 ## What gets tested
 
-Each test creates a fresh throwaway git repo via [fixtures/setup-clean-repo.sh](fixtures/setup-clean-repo.sh), optionally applies a prestate (e.g. a pre-existing untracked file), runs the cheap-coder bash template against a fake opencode that mutates the working tree, and asserts against the structured stdout.
+Each test creates a fresh throwaway git repo via [fixtures/setup-clean-repo.sh](fixtures/setup-clean-repo.sh), optionally applies a prestate (e.g. a pre-existing untracked file), runs the shipped engine script against a fake opencode that mutates the working tree, and asserts against the structured stdout.
 
 Production opencode is never invoked. Tests are deterministic and offline.
 
-## How extraction works
+## What's under test
 
-The agent .md contains the bash template in a single fenced `` ```bash `` block. [extract-template.sh](extract-template.sh) pulls out that block and substitutes `{{PARENT_TASK_QUOTED}}` with a single-quote-escaped task string via [substitute.js](substitute.js) (Node — used because awk/sed both have replacement-string backslash-handling quirks that corrupt `'\''`). The result is a runnable bash script identical to what the production subagent executes.
+The harness invokes the real shipped engine, [../lib/cheap-coder-run.sh](../lib/cheap-coder-run.sh), exactly as the subagent and the `/cheap` skill do — passing the task as the first argument. There is no extraction or substitution step anymore: the tests run the production script directly, so they cannot drift from what ships.
 
 ## Fake binaries
 
@@ -66,6 +66,6 @@ The case file is sourced inside a subshell, so cross-case state cannot leak.
 
 ## Prerequisites
 
-- bash, git, jq, node (node is only for substitute.js)
+- bash, git, jq, node (node is used by the fake opencode to JSON-encode event text)
 
 The tests use the real `jq` binary — the same prerequisite cheap-coder enforces in production via its own precondition check.

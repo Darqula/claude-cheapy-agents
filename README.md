@@ -6,6 +6,8 @@ the host Claude stays the PM and reviewer. The point is to cut token cost on rou
 implementation without giving up host-side judgment: opencode writes the code, the host
 reviews the diff before anything is committed.
 
+> **Note:** the [`CLAUDE.md`](CLAUDE.md) in this repo is a drop-in delegation directive for the **target project** you point cheap-coder at — copy it into that app's root so its host Claude delegates implementation by default. It is not configuration for developing this repo itself.
+
 ## Requirements
 
 - **opencode CLI** on PATH, authenticated, with a model configured (`opencode auth login`).
@@ -27,6 +29,10 @@ The host invokes it through the standard Agent tool:
 ```
 Agent(subagent_type: "cheap-coder", prompt: "<self-contained task>")
 ```
+
+Or run the **`/cheap` skill** — `/cheap <task>` — which executes the same engine directly
+in your session with no subagent hop. You (or the host) can invoke it; the task rules
+below are identical either way.
 
 opencode has no memory of the host conversation and cannot ask questions, so the task
 must be **self-contained**: concrete file paths (relative to the git root), exact
@@ -68,8 +74,8 @@ no `-m`).
 .claude/agents/test/run-tests.sh        # all cases
 ```
 
-The harness extracts the real bash template out of `cheap-coder.md` and runs it against a
-fake opencode driven by env vars — so it exercises the shipped code, not a copy.
+The harness runs the real engine script (`.claude/agents/lib/cheap-coder-run.sh`) directly
+against a fake opencode driven by env vars — so it exercises the shipped code, not a copy.
 
 ## Limitations
 
@@ -83,8 +89,12 @@ fake opencode driven by env vars — so it exercises the shipped code, not a cop
 
 ## More
 
-- [`.claude/agents/cheap-coder.md`](.claude/agents/cheap-coder.md) — the agent: routing
-  frontmatter + the bash protocol (every design decision is an inline comment).
+- [`.claude/agents/lib/cheap-coder-run.sh`](.claude/agents/lib/cheap-coder-run.sh) — the
+  engine: the whole bash protocol (every design decision is an inline comment). Run by the
+  subagent, the `/cheap` skill, and the tests alike.
+- [`.claude/agents/cheap-coder.md`](.claude/agents/cheap-coder.md) — the subagent: routing
+  frontmatter + the one short command it runs.
+- [`.claude/skills/cheap/SKILL.md`](.claude/skills/cheap/SKILL.md) — the `/cheap` skill.
 - [`.claude/agents/README.md`](.claude/agents/README.md) — deeper design notes and rationale.
 - [`.claude/agents/install/`](.claude/agents/install/) · [`.claude/agents/test/`](.claude/agents/test/)
   — dependency installers and the test harness.

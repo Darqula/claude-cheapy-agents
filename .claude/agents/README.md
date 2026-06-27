@@ -28,7 +28,7 @@ The host then reviews the diff and decides whether to commit.
 
 **Bounded summarization.** opencode's raw output can be tens of thousands of tokens. None of it touches the host. cheap-coder filters everything through `jq` into bounded files, then prints a fixed-format summary capped at ~10KB plus a 500-line diff preview. Above 500 diff lines, the host runs `git diff` itself.
 
-**Template not recipe.** The subagent doesn't generate the bash script — it executes a fixed template with one substitution point (the parent's task, single-quote-escaped). This removes a class of failure modes where the subagent could subtly drift the implementation across invocations.
+**Script, not an inline template.** The subagent doesn't reproduce the bash protocol — it invokes a fixed, version-controlled script ([lib/cheap-coder-run.sh](lib/cheap-coder-run.sh)) and passes only the task (as an argument, or on stdin). Keeping the orchestrator's output to one short command — rather than a 500-line block it must retype verbatim — removes a whole class of failure modes: subtle drift, or a small orchestration model mangling the script (e.g. mis-quoting it) across invocations.
 
 **Single Bash invocation.** The entire protocol runs in one bash process. Shell variables stay live; no inter-step state plumbing; cleanup is guaranteed by the EXIT trap regardless of how the script exits.
 
@@ -45,7 +45,7 @@ opencode often doesn't nail a task in one shot — it picks the wrong file, miss
 The session id rides the agent's two existing channels — no new input/output plumbing:
 
 - **Capture (opencode → parent):** every JSONL event carries `"sessionID":"ses_…"`. cheap-coder greps the first one and prints it as a `**Session ID:**` line in the structured summary (emitted for `success`, `partial`, *and* `failure` — even a broken run is worth iterating on).
-- **Replay (parent → opencode):** the parent prepends one header line — `RESUME-SESSION: ses_xxx`, then a blank line, then the follow-up — to the task string. The template peels the header off the task body and passes `--session ses_xxx` to `opencode run`.
+- **Replay (parent → opencode):** the parent prepends one header line — `RESUME-SESSION: ses_xxx`, then a blank line, then the follow-up — to the task string. The engine script peels the header off the task body and passes `--session ses_xxx` to `opencode run`.
 
 Two deliberate choices:
 
@@ -58,19 +58,10 @@ Two deliberate choices:
 
 | File | Purpose |
 |---|---|
-| [cheap-coder.md](cheap-coder.md) | The agent itself. Frontmatter routes the host; body is the execution protocol (a fixed bash template + substitution rule). |
+| [cheap-coder.md](cheap-coder.md) | The agent itself. Frontmatter routes the host; body tells the subagent to invoke the engine script with the task. |
+| [lib/cheap-coder-run.sh](lib/cheap-coder-run.sh) | The engine — the entire bash protocol. Invoked identically by the subagent, the `/cheap` skill, and the test harness. |
 | [install/](install/) | One-shot dependency installers (jq, opencode, timeout) for Linux, macOS, and Windows. See [install/README.md](install/README.md). |
-| [test/](test/) | Runnable test harness — exercises the extracted bash template against a fake opencode. See [test/README.md](test/README.md). |
-
-## Design history
-
-The agent was hardened through several rounds of self-review plus an external review pass, then locked in with the runnable [test harness](test/). Those passes drove the major shape of the current design:
-
-- The move from procedural pseudocode to a single fixed bash template — shell variables don't survive across separate Bash tool calls, so the whole protocol must run in one process.
-- Cross-platform guardrails — precondition checks (opencode/jq/git repo), GNU-`timeout` probing that rejects Windows's decoy `timeout.exe`, and `mktemp -d` portability.
-- Careful untracked-file handling (`-uall`, synthesized `--no-index` diffs, `comm`-based attribution) — the most regression-prone area, now guarded by the test suite.
-
-The distilled "why" behind each decision lives inline as comments in [cheap-coder.md](cheap-coder.md), right next to the code each one explains.
+| [test/](test/) | Runnable test harness — drives the engine script against a fake opencode. See [test/README.md](test/README.md). |
 
 ## Usage from another agent
 

@@ -22,7 +22,7 @@ set -u
 
 ROOT=$(cd "$(dirname "$0")" && pwd)
 AGENT_MD="$ROOT/../cheap-coder.md"
-EXTRACT="$ROOT/extract-template.sh"
+ENGINE="$ROOT/../lib/cheap-coder-run.sh"
 FAKE_BIN="$ROOT/fake-bin"
 FIXTURE="$ROOT/fixtures/setup-clean-repo.sh"
 
@@ -30,7 +30,7 @@ CASES_DIR="$ROOT/cases"
 FILTER=${1:-}
 
 # Make our scripts executable (one-time, idempotent).
-chmod +x "$EXTRACT" "$FAKE_BIN/opencode" "$FIXTURE" 2>/dev/null || true
+chmod +x "$ENGINE" "$FAKE_BIN/opencode" "$FIXTURE" 2>/dev/null || true
 
 # Track totals.
 total=0
@@ -109,9 +109,8 @@ run_case() {
       export FAKE_OPENCODE_SCRIPT="$opencode_script"
     fi
 
-    # Build the substituted bash script.
-    bash_script="$case_dir/cheap-coder.sh"
-    "$EXTRACT" "$AGENT_MD" "${TASK:-test task}" > "$bash_script"
+    # The script under test is the real shipped engine, invoked exactly as the
+    # subagent/skill do: the task is passed as the first argument.
 
     # Run cheap-coder with PATH front-loaded to find fake opencode first.
     # Use a clean PATH: fake bin + minimum to run git, jq, bash, node.
@@ -122,7 +121,7 @@ run_case() {
     if [ -n "$EXTRA_SETUP" ]; then
       eval "$EXTRA_SETUP"
     fi
-    PATH="$FAKE_BIN:$PATH" bash "$bash_script" > "$output_file" 2>&1
+    PATH="$FAKE_BIN:$PATH" bash "$ENGINE" "${TASK:-test task}" > "$output_file" 2>&1
     cc_exit=$?
 
     # Run case assertions.
