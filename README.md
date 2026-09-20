@@ -10,7 +10,11 @@ reviews the diff before anything is committed.
 
 ## Requirements
 
-- **opencode CLI** on PATH, authenticated, with a model configured (`opencode auth login`).
+- **opencode CLI v2.0.10+** on PATH, authenticated, with a usable model: either a working
+  default model in your opencode config (`opencode auth login`, then set `model` in
+  `opencode.json`) — or pass an explicit `MODEL:` header on every task (see below). If no
+  default is configured, opencode v2 fails with `provider.internal: Internal server error`
+  and cheap-coder's report tells you to fix it.
 - **jq** — parses opencode's JSONL event stream.
 - **bash** — Git Bash works on Windows.
 - **node** — only needed for the test harness.
@@ -79,9 +83,11 @@ MODEL: opencode-go/glm-5.3-flash
 <the task>
 ```
 
-No header means "use the config default" (no `--model` flag is passed). A header with a
-malformed id **fails fast** — cheap-coder refuses to invoke opencode rather than silently
-falling back to an unknown default, so fix the id and re-delegate.
+No header means "use the config default" (no `--model` flag is passed) — which requires
+your config to actually have a working default model; otherwise opencode v2 fails with
+`provider.internal` and the report tells you so. A header with a malformed id **fails
+fast** — cheap-coder refuses to invoke opencode rather than silently falling back to an
+unknown default, so fix the id and re-delegate.
 
 ## Tests
 

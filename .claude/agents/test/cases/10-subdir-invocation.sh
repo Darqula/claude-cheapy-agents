@@ -10,7 +10,7 @@ prestate() {
 }
 
 opencode_script() {
-  # opencode itself runs at repo root (via --dir), so it can write anywhere.
+  # opencode itself runs at repo root (its cwd), so it can write anywhere.
   mkdir -p tests
   cat > tests/new.test.ts <<'EOF'
 test("sanity", () => { expect(true).toBe(true); });

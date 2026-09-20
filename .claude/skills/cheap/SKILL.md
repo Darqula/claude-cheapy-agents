@@ -88,9 +88,10 @@ CHEAP_CODER_TASK
 ```
 
 It composes freely with `RESUME-SESSION:` (either order). No header → the opencode config
-default, exactly as before. A malformed model id fails the run fast rather than silently
-using some other default — the report tells you the expected format, so fix the id and
-re-run.
+default — which only works if that default is a valid model (opencode v2 fails with
+`provider.internal` otherwise; the report will say so). A malformed model id fails the run
+fast rather than silently using some other default — the report tells you the expected
+format, so fix the id and re-run.
 
 ## Requirements
 

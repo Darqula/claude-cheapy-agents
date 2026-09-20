@@ -22,10 +22,14 @@
 #                                so a case can assert --session/--model
 #                                passthrough and that the RESUME-SESSION /
 #                                MODEL headers were stripped.
+#   OPENCODE_CONFIG_CONTENT    - if set, recorded as CONFIG_SET=1 in the argv
+#                                log, so a case can assert the engine exports
+#                                its inline permission config.
 #
-# Args read: --dir, --session, --model, and the positional message. Others (run,
-# --format) are consumed/ignored, matching cheap-coder's usage:
-#   opencode run --dir <dir> --format json [--session <id>] [--model <id>] "<task>"
+# Args read: --standalone (flag), --session, --model, --format, and the
+# positional message. Mirroring cheap-coder's v2 usage:
+#   opencode run --standalone --format json [--session <id>] [--model <id>] "<task>"
+# Note: --standalone takes NO value (must not be confused with the message).
 
 set -e
 
@@ -50,6 +54,10 @@ while [ $# -gt 0 ]; do
     --format)
       shift 2
       ;;
+    --standalone)
+      STANDALONE=1
+      shift
+      ;;
     run)
       shift
       ;;
@@ -60,10 +68,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ -z "$DIR" ]; then
-  echo "fake-opencode: --dir not provided" >&2
-  exit 2
-fi
+# v2 has no --dir: the CLI runs in its own cwd (the engine cd's to the git
+# root first). Fall back to the cwd when --dir is not supplied.
+DIR=${DIR:-$PWD}
 
 # Record what we were invoked with, for cases that assert on --session
 # passthrough and RESUME-SESSION header stripping. Written to a path OUTSIDE
@@ -72,6 +79,12 @@ if [ -n "${FAKE_OPENCODE_ARGV_LOG:-}" ]; then
   {
     printf 'SESSION=%s\n' "$SESSION_ARG"
     printf 'MODEL=%s\n' "$MODEL_ARG"
+    if [ -n "${OPENCODE_CONFIG_CONTENT:-}" ]; then
+      printf 'CONFIG_SET=1\n'
+    fi
+    if [ -n "${STANDALONE:-}" ]; then
+      printf 'STANDALONE=1\n'
+    fi
     printf 'MESSAGE_BEGIN\n'
     printf '%s\n' "$MESSAGE"
     printf 'MESSAGE_END\n'

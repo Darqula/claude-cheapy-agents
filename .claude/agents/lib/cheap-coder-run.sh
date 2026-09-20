@@ -51,7 +51,8 @@ FAIL
   exit 0
 fi
 
-# Precondition: must be inside a git repo. We need a stable root for `--dir`
+# Precondition: must be inside a git repo. The repo root is opencode's working
+# directory (v2 removed `opencode run --dir`; the CLI simply uses its own cwd)
 # and we need `git status`/`git diff` to track opencode's work.
 GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 if [ -z "$GIT_ROOT" ]; then
@@ -69,13 +70,15 @@ FAIL
   exit 0
 fi
 
-# Move into the repo root for every subsequent git operation. opencode itself
-# is pinned via `--dir "$GIT_ROOT"`, but several git commands we invoke from
-# this script are cwd-sensitive (notably `git ls-files --others`, which only
+# Move into the repo root for every subsequent git operation — and for the
+# opencode invocation itself, whose cwd IS its working directory (there is no
+# `--dir` flag in opencode v2). Several git commands we invoke from this
+# script are cwd-sensitive (notably `git ls-files --others`, which only
 # lists untracked files under the current directory). Without this cd, if the
-# parent invoked us from a subdirectory, untracked-file discovery and any
-# relative paths would silently miss content outside that subtree. Matches
-# the documented contract that paths are interpreted relative to repo root.
+# parent invoked us from a subdirectory, untracked-file discovery, any
+# relative paths, and opencode's own work directory would silently miss
+# content outside that subtree. Matches the documented contract that paths
+# are interpreted relative to repo root.
 cd "$GIT_ROOT" || {
   cat <<'FAIL'
 ## cheap-coder result
@@ -250,14 +253,36 @@ if [ -z "$TIMEOUT_CMD" ]; then
   echo "WARN: GNU timeout/gtimeout not found; opencode will run without a wall-clock limit" >&2
 fi
 
+# Per-invocation permission policy, scoped to this ONE run via an inline
+# config env var — it does not touch the user's opencode.json.
+#
+# v2 mechanics (verified against opencode v2.0.10):
+#   - The v1 `OPENCODE_PERMISSION` env var is GONE in v2 (the string no longer
+#     exists in the binary; it is silently ignored).
+#   - `OPENCODE_CONFIG_CONTENT` (inline JSON config) still exists and is the
+#     highest-precedence config source — but only a server started for THIS
+#     invocation reads it. The default run mode connects to a shared
+#     background service whose config was loaded when IT started, so the env
+#     var would be silently dropped — hence `--standalone` below, which
+#     spawns a private server per run that honors it.
+#   - Key names: the installed binary's schema still uses the v1-shaped
+#     `permission` object (`bash`, `task`, `question`, `external_directory`,
+#     `skill`…) — the newer `permissions` rules array documented on the
+#     website is NOT accepted by this build. We target the binary.
+# Policy (unchanged from v1): everything not denied uses opencode's permissive
+# defaults (allow), and we deny external_directory (sandbox escape), question
+# (no human to answer in non-interactive mode), and task/skill (cheap-coder
+# runs one task, doesn't spawn its own agents).
+
 # Run opencode. Key choices:
-#   - OPENCODE_PERMISSION (env var): per-tool permission policy scoped to this
-#     ONE invocation. Does not touch the user's opencode.json. Allows what
-#     opencode needs for normal coding work, denies external_directory
-#     (sandbox escape), question (no human to answer in non-interactive mode),
-#     task/skill (cheap-coder runs one task, doesn't spawn its own agents).
-#   - --dir: pinned to git root so opencode's cwd is unambiguous on Windows
-#     where the shell's cwd can drift.
+#   - OPENCODE_CONFIG_CONTENT (env var): inline permission config scoped to
+#     this ONE invocation (see the policy comment above).
+#   - --standalone: run with a private server instead of the background
+#     service — REQUIRED for the inline config above to take effect (the
+#     background service ignores per-invocation config). It also isolates
+#     this run from any concurrently running opencode sessions.
+#   - No --dir: the flag was removed in opencode v2; the CLI uses its own cwd,
+#     which the script has already cd'd to the git root.
 #   - --format json: emits JSONL event stream — one event per line. Stdout
 #     redirected to a file so the raw transcript never enters the agent's
 #     context. Stderr captured separately for diagnostics.
@@ -285,10 +310,10 @@ fi
 # Both are pure no-ops in a normal interactive shell with no proxy, so they are safe
 # everywhere.
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
-OPENCODE_PERMISSION='{"read":"allow","edit":"allow","glob":"allow","grep":"allow","lsp":"allow","websearch":"allow","webfetch":"allow","bash":"allow","external_directory":"deny","question":"deny","task":"deny","skill":"deny"}' \
+OPENCODE_CONFIG_CONTENT='{"permission":{"external_directory":"deny","question":"deny","task":"deny","skill":"deny"}}' \
 ${TIMEOUT_CMD:+$TIMEOUT_CMD 900} \
 opencode run \
-  --dir "$GIT_ROOT" \
+  --standalone \
   --format json \
   ${RESUME_SESSION_ID:+--session $RESUME_SESSION_ID} \
   ${MODEL_ID:+--model $MODEL_ID} \
@@ -354,7 +379,11 @@ SESSION_ID=$(grep -m1 -o '"sessionID":"ses_[A-Za-z0-9]*"' "$CC_TMP/opencode.json
 
 # 3b. Error events from the stream (separate from exit code; opencode can
 #     emit errors without aborting).
-jq -r 'select(.type=="error") | "\(.error.name): \(.error.data.message // "no message")"' "$CC_TMP/opencode.jsonl" 2>/dev/null > "$CC_TMP/errors.txt"
+#     Shape evolved across versions: v1 used `.error.name` +
+#     `.error.data.message`; v2 (verified 2.0.10) uses `.error.type` +
+#     `.error.message` (e.g. provider.internal: Internal server error).
+#     `//`-fallbacks cover both so neither schema reports "null: no message".
+jq -r 'select(.type=="error") | "\(.error.name // .error.type // "unknown"): \(.error.data.message // .error.message // "no message")"' "$CC_TMP/opencode.jsonl" 2>/dev/null > "$CC_TMP/errors.txt"
 
 # 3c. Files opencode changed. We derive from git, not from parsing tool_use
 #     events, because the field name for paths inside `part.state.input`
@@ -503,6 +532,16 @@ fi
 # and re-delegate to actually resume.
 if [ "$RESUME_HEADER_MALFORMED" -eq 1 ]; then
   WARNINGS="${WARNINGS}RESUME-SESSION header was present but the session id was malformed (expected 'ses_' followed by letters/digits) — ran a fresh session instead of resuming. "
+fi
+
+# Anomaly 9: provider.internal error events with NO model override in play.
+# This is the signature of a broken config default model (e.g. a model id
+# that opencode has rotated/removed — the stream spins on step_start events
+# then dies with provider.internal 500, verified against v2.0.10). When a
+# MODEL header was supplied, the failure is on the explicitly-pinned model
+# and the parent already knows which id to fix — no extra hint needed.
+if [ -z "$MODEL_ID" ] && grep -q 'provider\.internal' "$CC_TMP/errors.txt" 2>/dev/null; then
+  WARNINGS="${WARNINGS}provider.internal error with no MODEL header — the opencode config default model may be invalid/rotated; set a working default ('opencode models' to list) or prepend a 'MODEL: provider/model' header. "
 fi
 
 # ---- Step 4: status rubric ----
