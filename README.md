@@ -65,8 +65,23 @@ cheap-coder runs as a single bash process that:
    bounded diff preview (<500 lines), warnings, and the session id.
 
 The raw opencode transcript never enters the host's context — only the bounded report
-does. The coding model is whatever the user's opencode config selects (cheap-coder passes
-no `-m`).
+does. The coding model is whatever the user's opencode config selects, unless the task
+overrides it with a `MODEL: provider/model` header (see below).
+
+### Model override
+
+Prepend a `MODEL:` header to the task to run that specific model instead of the opencode
+config default (format: `provider/model`, optionally `provider/model#variant`):
+
+```
+MODEL: opencode-go/glm-5.3-flash
+
+<the task>
+```
+
+No header means "use the config default" (no `--model` flag is passed). A header with a
+malformed id **fails fast** — cheap-coder refuses to invoke opencode rather than silently
+falling back to an unknown default, so fix the id and re-delegate.
 
 ## Tests
 
@@ -84,8 +99,9 @@ against a fake opencode driven by env vars — so it exercises the shipped code,
 - **Stage before delegating to a dirty tree.** Pre-existing *unstaged* edits to a file the
   subagent also touches can't be cleanly attributed in the report (the diff content is
   still correct — only the "Files changed" list is affected). Stage or commit first.
-- **No model override.** The coding model comes from the user's opencode config; cheap-coder
-  does not pass `-m`/`--model`.
+- **Model override is opt-in per task.** Without a `MODEL:` header the coding model comes
+  from the user's opencode config; with one, the exact `provider/model[#variant]` id is
+  required — a malformed id fails the run instead of degrading (see "Model override").
 
 ## More
 

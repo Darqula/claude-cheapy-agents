@@ -129,11 +129,14 @@ else
   PARENT_TASK="$(cat)"
 fi
 
-# Optional session resumption. The parent may prepend a single header line
-#   RESUME-SESSION: ses_<id>
-# (optionally followed by a blank line) to the task string. If present, we peel
-# it off and pass `--session <id>` to opencode so the conversation continues
-# instead of starting fresh. We use an explicit id (never opencode's `--continue`
+# Optional directive headers. The parent may prepend either (or both, in any
+# order) as single header lines:
+#   RESUME-SESSION: ses_<id>          — continue that opencode conversation
+#   MODEL: provider/model[#variant]   — override the coding model for this run
+# Each is peeled off (with one optional blank separator line) before the task
+# body is used. We peel in a loop so both orders work.
+#
+# For RESUME-SESSION we use an explicit id (never opencode's `--continue`
 # "last session") because each cheap-coder call is an independent process — a
 # concurrent opencode run elsewhere could otherwise become the "last session".
 #
@@ -142,25 +145,75 @@ fi
 # line; `${var#*$'\n'}` is everything after the first newline.
 RESUME_SESSION_ID=""
 RESUME_HEADER_MALFORMED=0
-case "$PARENT_TASK" in
-  "RESUME-SESSION: "*)
-    resume_first_line=${PARENT_TASK%%$'\n'*}
-    resume_candidate=${resume_first_line#RESUME-SESSION: }
-    # Strip the header line, and one optional blank separator line, from the body.
-    resume_body=${PARENT_TASK#*$'\n'}
-    [ "$resume_body" = "$PARENT_TASK" ] && resume_body=""   # header-only, no body
-    case "$resume_body" in $'\n'*) resume_body=${resume_body#$'\n'} ;; esac
-    PARENT_TASK=$resume_body
-    # Validate: opencode session ids are `ses_` + base62 ([A-Za-z0-9]). Anything
-    # else (empty, wrong prefix, stray chars) is treated as no-resume and warned
-    # about later, so the parent still gets a result and learns the header was bad.
-    if printf '%s' "$resume_candidate" | grep -Eq '^ses_[A-Za-z0-9]+$'; then
-      RESUME_SESSION_ID=$resume_candidate
-    else
-      RESUME_HEADER_MALFORMED=1
-    fi
-    ;;
-esac
+MODEL_ID=""
+MODEL_HEADER_MALFORMED=0
+while :; do
+  case "$PARENT_TASK" in
+    "RESUME-SESSION: "*)
+      resume_first_line=${PARENT_TASK%%$'\n'*}
+      resume_candidate=${resume_first_line#RESUME-SESSION: }
+      # Strip the header line, and one optional blank separator line, from the body.
+      resume_body=${PARENT_TASK#*$'\n'}
+      [ "$resume_body" = "$PARENT_TASK" ] && resume_body=""   # header-only, no body
+      case "$resume_body" in $'\n'*) resume_body=${resume_body#$'\n'} ;; esac
+      PARENT_TASK=$resume_body
+      # Validate: opencode session ids are `ses_` + base62 ([A-Za-z0-9]). Anything
+      # else (empty, wrong prefix, stray chars) is treated as no-resume and warned
+      # about later, so the parent still gets a result and learns the header was bad.
+      if printf '%s' "$resume_candidate" | grep -Eq '^ses_[A-Za-z0-9]+$'; then
+        RESUME_SESSION_ID=$resume_candidate
+      else
+        RESUME_HEADER_MALFORMED=1
+      fi
+      ;;
+    "MODEL: "*)
+      model_first_line=${PARENT_TASK%%$'\n'*}
+      model_candidate=${model_first_line#MODEL: }
+      model_body=${PARENT_TASK#*$'\n'}
+      [ "$model_body" = "$PARENT_TASK" ] && model_body=""   # header-only, no body
+      case "$model_body" in $'\n'*) model_body=${model_body#$'\n'} ;; esac
+      PARENT_TASK=$model_body
+      # Validate: opencode model ids are `provider/model`, optionally followed by
+      # `#variant` (e.g. `opencode-go/glm-5.3-flash`). Unlike the resume id —
+      # where a bad value merely degrades to a fresh session — a malformed model
+      # FAILS FAST (checked right after this loop): an invalid model string could
+      # silently resolve to whatever the config picks, and we cannot assume that
+      # default is the cheap model the parent intended — opencode rotates and
+      # removes models often enough that an explicit override must either be
+      # exactly right or not run at all. Omitting the header entirely is the
+      # documented way to use the config default.
+      if printf '%s' "$model_candidate" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._#/-]*$'; then
+        MODEL_ID=$model_candidate
+      else
+        MODEL_HEADER_MALFORMED=1
+      fi
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+# Fail fast on a malformed MODEL header — before any git snapshot or opencode
+# invocation. Deliberately NOT a graceful degrade: falling back to the config
+# default would silently run the task on an unknown (possibly expensive) model,
+# which is worse than surfacing the typo immediately. Omit the header to use
+# the config default. Same structured-report shape as the precondition
+# failures above, so the parent's parser sees a normal failure.
+if [ "$MODEL_HEADER_MALFORMED" -eq 1 ]; then
+  cat <<'FAIL'
+## cheap-coder result
+
+**Status:** failure
+**Opencode summary:** (not invoked)
+**Files changed:** none
+**Diff size:** 0 files, +0/-0 lines
+**Diff preview:** omitted
+**Warnings:** MODEL header was present but the model id was malformed — expected 'provider/model' or 'provider/model#variant' (e.g. 'opencode-go/glm-5.3-flash'); opencode was NOT invoked
+**Next step (parent):** fix the MODEL header (format: 'MODEL: provider/model') and re-delegate; omit the header entirely to use the opencode config default.
+FAIL
+  exit 0
+fi
 
 # Compose the full prompt: non-negotiable git-policy prefix + the parent's task.
 # The prefix instructs opencode never to stage/commit — we want all changes left
@@ -211,7 +264,10 @@ fi
 #   - --session: passed ONLY when the parent supplied a valid RESUME-SESSION
 #     header (parsed above). `${RESUME_SESSION_ID:+--session $RESUME_SESSION_ID}`
 #     expands to nothing when empty, preserving the fresh-session default exactly.
-#   - No -m/--model flag: model selection comes from the user's opencode config.
+#   - --model: passed ONLY when the parent supplied a valid MODEL header. Same
+#     `${VAR:+...}` pattern — without a header, model selection comes from the
+#     user's opencode config, exactly as before. (A malformed header never
+#     reaches this line: it fails fast right after the header parse.)
 # `${TIMEOUT_CMD:+$TIMEOUT_CMD 900}` expands to `timeout 900` if probe succeeded,
 # nothing otherwise.
 #
@@ -235,6 +291,7 @@ opencode run \
   --dir "$GIT_ROOT" \
   --format json \
   ${RESUME_SESSION_ID:+--session $RESUME_SESSION_ID} \
+  ${MODEL_ID:+--model $MODEL_ID} \
   "$FULL_TASK" \
   < /dev/null \
   > "$CC_TMP/opencode.jsonl" 2> "$CC_TMP/opencode.err"

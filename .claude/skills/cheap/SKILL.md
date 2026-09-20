@@ -74,6 +74,24 @@ CHEAP_CODER_TASK
 The argument form works too (`bash .claude/agents/lib/cheap-coder-run.sh 'RESUME-SESSION: ses_…'`),
 but the heredoc is easier for a multi-line follow-up. Omit the header to start fresh.
 
+## Overriding the model
+
+Prepend a `MODEL: <provider/model>` header (optionally `provider/model#variant`) as the
+first line of the task to pin the coding model for that run:
+
+```bash
+bash .claude/agents/lib/cheap-coder-run.sh <<'CHEAP_CODER_TASK'
+MODEL: opencode-go/glm-5.3-flash
+
+<the self-contained task, verbatim>
+CHEAP_CODER_TASK
+```
+
+It composes freely with `RESUME-SESSION:` (either order). No header → the opencode config
+default, exactly as before. A malformed model id fails the run fast rather than silently
+using some other default — the report tells you the expected format, so fix the id and
+re-run.
+
 ## Requirements
 
 opencode on PATH and a git repo (the engine fails fast otherwise). The raw opencode
