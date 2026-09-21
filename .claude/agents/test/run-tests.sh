@@ -2,21 +2,16 @@
 # Test runner for cheap-coder.
 #
 # Usage: run-tests.sh [case-name]
-#   With no arg: runs every cases/*.sh.
-#   With a name: runs only cases/<name>.sh.
+#   With no arg: runs every cases/*.sh. With a name: runs only that case.
 #
 # Each test case is a bash script that defines:
 #   - prestate(REPO)             - optional. Apply prestate before the script runs.
-#   - opencode_script(REPO)      - body of a script the fake opencode will run.
-#                                  Mutations happen in $REPO.
-#   - assert(OUTPUT_FILE, REPO)  - given the captured stdout and the repo dir,
-#                                  print 'PASS' or 'FAIL: <reason>'. Multiple
-#                                  failures may be reported, one per line.
-#   - Optional env vars:
-#       FAKE_OPENCODE_SUMMARY, FAKE_OPENCODE_ERROR, FAKE_OPENCODE_EXIT_CODE,
-#       FAKE_OPENCODE_EMIT_NOTHING, TASK, EXTRA_SETUP
+#   - opencode_script(REPO)      - body of a script the fake opencode will run
+#                                  (mutations happen in $REPO).
+#   - assert(OUTPUT_FILE, REPO)  - print 'PASS' or 'FAIL: <reason>' per line.
+#   - Optional env vars: TASK, EXTRA_SETUP, FAKE_OPENCODE_* (see fake-bin/opencode)
 #
-# Each case is run in its own subshell so env vars don't leak.
+# Each case runs in its own subshell so env vars don't leak.
 
 set -u
 
@@ -38,7 +33,7 @@ passed=0
 failed=0
 failed_names=()
 
-# Color helpers (disabled if not a tty or on dumb terminals).
+# Color helpers (disabled when not a tty).
 if [ -t 1 ] && [ "${TERM:-}" != "dumb" ]; then
   C_GREEN=$(printf '\033[32m')
   C_RED=$(printf '\033[31m')
@@ -72,17 +67,16 @@ run_case() {
     TASK=""
     EXTRA_SETUP=""
 
-    # Where the fake opencode records the argv it saw (--session, message).
-    # Lives in case_dir (OUTSIDE the test repo) so it never shows up as an
-    # untracked file in cheap-coder's diff. assert() reads it via this same var.
+    # Argv log lives in case_dir (outside the test repo) so it never shows up
+    # as an untracked file in cheap-coder's diff; assert() reads it via the
+    # same var.
     export FAKE_OPENCODE_ARGV_LOG="$case_dir/argv.log"
 
     # Source the case definition.
     # shellcheck disable=SC1090
     source "$case_file"
 
-    # The case file may have set FAKE_OPENCODE_* vars or TASK at top level.
-    # Export them so they survive into the fake opencode subprocess.
+    # Export case-level vars so they survive into the fake opencode subprocess.
     export FAKE_OPENCODE_SUMMARY FAKE_OPENCODE_ERROR FAKE_OPENCODE_EXIT_CODE FAKE_OPENCODE_EMIT_NOTHING FAKE_OPENCODE_SESSION_ID
 
     # Set up a clean repo.
@@ -109,15 +103,11 @@ run_case() {
       export FAKE_OPENCODE_SCRIPT="$opencode_script"
     fi
 
-    # The script under test is the real shipped engine, invoked exactly as the
-    # subagent/skill do: the task is passed as the first argument.
-
-    # Run cheap-coder with PATH front-loaded to find fake opencode first.
-    # Use a clean PATH: fake bin + minimum to run git, jq, bash, node.
+    # Run the real shipped engine exactly as the subagent/skill do, with PATH
+    # front-loaded to find the fake opencode; minimal PATH (git, jq, bash, node).
     cd "$REPO"
-    # Optional per-case setup that runs after we cd into REPO but before
-    # the cheap-coder script is invoked. Used to e.g. simulate the parent
-    # invoking cheap-coder from a subdirectory of the repo.
+    # Per-case setup that runs after cd into REPO but before the engine is
+    # invoked (e.g. to start from a subdirectory).
     if [ -n "$EXTRA_SETUP" ]; then
       eval "$EXTRA_SETUP"
     fi

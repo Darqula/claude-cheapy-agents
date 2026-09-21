@@ -41,8 +41,8 @@ the task you intend to delegate).
    CHEAP_CODER_TASK
    ```
 
-   Run it from the **repository root** — the script path is relative to it (the engine
-   then pins opencode to the git root on its own).
+   Run it from the **repository root** — the script path is relative to it (the
+   engine then runs opencode from the git root on its own).
 
 4. **Review the report yourself.** It ends with a status, the changed files, a diff
    size, a bounded diff preview (<500 lines), warnings, and a session id. Run `git diff`

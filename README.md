@@ -1,12 +1,14 @@
 # claude-cheapy-agents
 
 A Claude Code subagent — **cheap-coder** — that delegates well-specified coding to a
-low-cost external model (Qwen-3.7 Max via the [opencode](https://opencode.ai) CLI) while
-the host Claude stays the PM and reviewer. The point is to cut token cost on routine
-implementation without giving up host-side judgment: opencode writes the code, the host
-reviews the diff before anything is committed.
+low-cost external model via the [opencode](https://opencode.ai) CLI (e.g.
+`opencode-go/glm-5.3-flash`) while the host Claude stays the PM and reviewer. The point
+is to cut token cost on routine implementation without giving up host-side judgment:
+opencode writes the code, the host reviews the diff before anything is committed.
 
-> **Note:** the [`CLAUDE.md`](CLAUDE.md) in this repo is a drop-in delegation directive for the **target project** you point cheap-coder at — copy it into that app's root so its host Claude delegates implementation by default. It is not configuration for developing this repo itself.
+> **Note:** [`CLAUDE.md`](CLAUDE.md) is a drop-in delegation directive for the **target
+> project** you point cheap-coder at — copy it into that app's root. It is not
+> configuration for developing this repo.
 
 ## Requirements
 
@@ -112,8 +114,8 @@ against a fake opencode driven by env vars — so it exercises the shipped code,
 ## More
 
 - [`.claude/agents/lib/cheap-coder-run.sh`](.claude/agents/lib/cheap-coder-run.sh) — the
-  engine: the whole bash protocol (every design decision is an inline comment). Run by the
-  subagent, the `/cheap` skill, and the tests alike.
+  engine: the whole bash protocol. Run by the subagent, the `/cheap` skill, and the tests
+  alike.
 - [`.claude/agents/cheap-coder.md`](.claude/agents/cheap-coder.md) — the subagent: routing
   frontmatter + the one short command it runs.
 - [`.claude/skills/cheap/SKILL.md`](.claude/skills/cheap/SKILL.md) — the `/cheap` skill.

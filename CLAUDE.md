@@ -3,8 +3,7 @@
 ## Delegate substantial implementation to the cheap-coder subagent
 
 This project provides a `cheap-coder` subagent that hands well-specified coding to a
-low-cost external model (Qwen-3.7 Max via the opencode CLI) at coding-benchmark parity
-with Claude. For substantial implementation work it is the DEFAULT; small tasks you do
+low-cost external model via the opencode CLI at coding-benchmark parity with Claude. For substantial implementation work it is the DEFAULT; small tasks you do
 inline (see the size threshold below).
 
 **IMPORTANT — routing rule, apply it on EVERY coding task:**

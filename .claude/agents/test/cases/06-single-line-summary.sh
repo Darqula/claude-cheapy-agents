@@ -1,6 +1,4 @@
-# Case 06 (regression — single-line summary wrongly fenced): single-line summary should
-# NOT be fenced. This is the bug we accidentally trigger with the buggy
-# grep -q $'\n' detection — it fences even single-line summaries.
+# Case 06 (regression): a single-line summary must stay inline, not be fenced.
 
 TASK="modify src/existing.ts"
 

@@ -1,22 +1,18 @@
 #!/usr/bin/env bash
-# cheap-coder protocol — runs in ONE bash process so all shell variables stay live.
-# No `set -e`: the protocol deliberately tolerates expected non-zero exits
-# (e.g. `jq` returning empty when no error events exist). Exit codes that
-# actually matter are checked explicitly.
+# cheap-coder engine — runs the whole protocol in one bash process so shell
+# variables stay live. No `set -e`: expected non-zero exits (e.g. jq on an
+# empty stream) are tolerated; exits that matter are checked explicitly.
 
 # ---- Step 1: setup ----
 
 # Per-invocation scratch dir. Bare `mktemp -d` works on GNU, BSD, and Git Bash
-# (the `-t TEMPLATE` form has divergent semantics across platforms — do not use it).
+# (the `-t TEMPLATE` form has divergent semantics across platforms).
 CC_TMP=$(mktemp -d) || { echo "FATAL: mktemp -d failed"; exit 1; }
 
-# Guarantee cleanup on ANY exit path (normal, error, SIGINT, SIGTERM, opencode
-# crash, our own `exit N` below). The `[ -n ... ]` guard is paranoia in case
-# CC_TMP is somehow empty — `rm -rf ""` errors out harmlessly on modern rm
-# but we'd rather not even try.
+# Cleanup on every exit path (normal, error, signal, opencode crash).
 trap '[ -n "$CC_TMP" ] && rm -rf "$CC_TMP"' EXIT
 
-# Precondition: opencode CLI must be installed and on PATH.
+# Precondition: opencode CLI on PATH.
 if ! command -v opencode >/dev/null 2>&1; then
   cat <<'FAIL'
 ## cheap-coder result
@@ -32,10 +28,8 @@ FAIL
   exit 0
 fi
 
-# Precondition: jq must be installed. The summary/error-event extractors
-# depend on it; without jq, those `jq` calls would fail silently (stderr is
-# discarded) and the script would report `success` with no summary and no
-# error detection. Fail fast and tell the parent.
+# Precondition: jq on PATH. The summary/error-event extractors depend on it
+# and would otherwise fail silently, producing a hollow "success".
 if ! command -v jq >/dev/null 2>&1; then
   cat <<'FAIL'
 ## cheap-coder result
@@ -51,9 +45,9 @@ FAIL
   exit 0
 fi
 
-# Precondition: must be inside a git repo. The repo root is opencode's working
-# directory (v2 removed `opencode run --dir`; the CLI simply uses its own cwd)
-# and we need `git status`/`git diff` to track opencode's work.
+# Precondition: inside a git repo. The repo root is opencode's working
+# directory (v2 removed `opencode run --dir`) and provides `git status`/`git
+# diff` for the report.
 GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 if [ -z "$GIT_ROOT" ]; then
   cat <<'FAIL'
@@ -70,15 +64,10 @@ FAIL
   exit 0
 fi
 
-# Move into the repo root for every subsequent git operation — and for the
-# opencode invocation itself, whose cwd IS its working directory (there is no
-# `--dir` flag in opencode v2). Several git commands we invoke from this
-# script are cwd-sensitive (notably `git ls-files --others`, which only
-# lists untracked files under the current directory). Without this cd, if the
-# parent invoked us from a subdirectory, untracked-file discovery, any
-# relative paths, and opencode's own work directory would silently miss
-# content outside that subtree. Matches the documented contract that paths
-# are interpreted relative to repo root.
+# Work from the repo root: the opencode CLI uses its own cwd (no `--dir` in
+# v2), and several git commands are cwd-sensitive (`git ls-files --others`
+# only lists untracked files under the current directory). Without this cd,
+# a caller in a subdirectory would miss content outside that subtree.
 cd "$GIT_ROOT" || {
   cat <<'FAIL'
 ## cheap-coder result
@@ -94,58 +83,41 @@ FAIL
   exit 0
 }
 
-# Record pre-existing uncommitted changes so opencode's modifications can be
-# distinguished from work the parent already had in progress.
-#   - `--porcelain -z` uses NUL record separators AND emits paths raw (no
-#     double-quoting of paths containing spaces or non-ASCII chars, which
-#     plain --porcelain would otherwise produce).
-#   - `-uall` expands untracked directories to their individual files.
-#     Without this, a new directory like `src/new-module/` would appear as
-#     a single `?? src/new-module/` entry, hiding the actual nested files
-#     from both the changed list and the synthesized untracked-file diff.
-#   - `tr '\0' '\n'` converts back to line-oriented so `sort` and `comm`
-#     work normally. Safe because v1 `-z` never emits literal newlines
-#     inside paths (the one case `-z` is specifically designed to protect).
-#   - LC_ALL=C pins sort order to byte-wise so `comm` later cannot be
-#     misled by locale differences between this sort and the poststate sort.
+# Pre-existing uncommitted changes, later diffed against the post-run state to
+# attribute only opencode's work.
+#   --porcelain -z  NUL-separated, paths unquoted (survives spaces/non-ASCII)
+#   -uall           expand untracked dirs to individual files
+#   tr '\0' '\n'    line-oriented for sort/comm (-z paths never contain \n)
+#   LC_ALL=C        byte-wise sort so `comm` below is locale-stable
 LC_ALL=C git status --porcelain -uall -z | tr '\0' '\n' | LC_ALL=C sort > "$CC_TMP/prestate.txt"
 
-# Snapshot the index tree hash so we can detect if opencode mutated the index
-# despite the no-staging policy. `git write-tree` hashes the current index into
-# a tree object without modifying anything. Comparing pre vs post tells us
-# whether the index changed during the opencode run — far more precise than
-# `git diff --cached --quiet`, which false-positives on any pre-existing
-# staged content. Empty string if not in a git repo with a valid index;
-# the guard above already rejected that case, so we expect a valid hash here.
+# Index tree hash before the run; compared after to detect no-staging policy
+# violations. (`git diff --cached --quiet` would false-positive on pre-existing
+# staged content; the tree hash only changes if the index itself changed.)
 PRE_INDEX_TREE=$(git write-tree 2>/dev/null)
 
 # ---- Step 2: invoke opencode ----
 
-# The parent's task. Passed as the FIRST ARGUMENT when present; otherwise read from
-# stdin (e.g. a `<<'EOF'` heredoc), which needs no shell-escaping at all. Callers that
-# can quote reliably — the /cheap skill, the test harness, a human on the CLI — pass it
-# as "$1". The stdin path is the no-escaping escape hatch for tasks with gnarly quotes.
-# Either way the rest of the protocol is identical; nothing here is templated anymore.
+# The parent's task: first argument when present, else read from stdin
+# (heredoc) — the no-escaping path for quote-heavy tasks. The protocol is
+# identical either way.
 if [ "$#" -ge 1 ]; then
   PARENT_TASK="$1"
 else
   PARENT_TASK="$(cat)"
 fi
 
-# Optional directive headers. The parent may prepend either (or both, in any
-# order) as single header lines:
+# Optional directive headers, peeled off the top of the task (each with one
+# optional blank separator line). Either order, both allowed:
 #   RESUME-SESSION: ses_<id>          — continue that opencode conversation
 #   MODEL: provider/model[#variant]   — override the coding model for this run
-# Each is peeled off (with one optional blank separator line) before the task
-# body is used. We peel in a loop so both orders work.
 #
-# For RESUME-SESSION we use an explicit id (never opencode's `--continue`
-# "last session") because each cheap-coder call is an independent process — a
-# concurrent opencode run elsewhere could otherwise become the "last session".
+# RESUME-SESSION uses an explicit id, never opencode's `--continue` ("last
+# session"): each cheap-coder call is an independent process, and a concurrent
+# opencode run elsewhere could become the "last session".
 #
-# All string surgery here is pure bash parameter expansion (no sed/awk) so it
-# behaves identically across GNU/BSD/Git Bash. `${var%%$'\n'*}` is the first
-# line; `${var#*$'\n'}` is everything after the first newline.
+# String surgery is bash parameter expansion only (no sed/awk) for
+# cross-platform parity.
 RESUME_SESSION_ID=""
 RESUME_HEADER_MALFORMED=0
 MODEL_ID=""
@@ -155,14 +127,13 @@ while :; do
     "RESUME-SESSION: "*)
       resume_first_line=${PARENT_TASK%%$'\n'*}
       resume_candidate=${resume_first_line#RESUME-SESSION: }
-      # Strip the header line, and one optional blank separator line, from the body.
+      # Strip the header line and one optional blank separator line.
       resume_body=${PARENT_TASK#*$'\n'}
       [ "$resume_body" = "$PARENT_TASK" ] && resume_body=""   # header-only, no body
       case "$resume_body" in $'\n'*) resume_body=${resume_body#$'\n'} ;; esac
       PARENT_TASK=$resume_body
-      # Validate: opencode session ids are `ses_` + base62 ([A-Za-z0-9]). Anything
-      # else (empty, wrong prefix, stray chars) is treated as no-resume and warned
-      # about later, so the parent still gets a result and learns the header was bad.
+      # Session ids are `ses_` + base62; anything else is treated as no-resume
+      # and warned about later.
       if printf '%s' "$resume_candidate" | grep -Eq '^ses_[A-Za-z0-9]+$'; then
         RESUME_SESSION_ID=$resume_candidate
       else
@@ -176,15 +147,10 @@ while :; do
       [ "$model_body" = "$PARENT_TASK" ] && model_body=""   # header-only, no body
       case "$model_body" in $'\n'*) model_body=${model_body#$'\n'} ;; esac
       PARENT_TASK=$model_body
-      # Validate: opencode model ids are `provider/model`, optionally followed by
-      # `#variant` (e.g. `opencode-go/glm-5.3-flash`). Unlike the resume id —
-      # where a bad value merely degrades to a fresh session — a malformed model
-      # FAILS FAST (checked right after this loop): an invalid model string could
-      # silently resolve to whatever the config picks, and we cannot assume that
-      # default is the cheap model the parent intended — opencode rotates and
-      # removes models often enough that an explicit override must either be
-      # exactly right or not run at all. Omitting the header entirely is the
-      # documented way to use the config default.
+      # Model ids are `provider/model` optionally `#variant`. A malformed value
+      # fails fast (below): falling back to the config default could run the
+      # task on an unknown model, so an explicit override must be exactly right
+      # or not run at all. Omitting the header is the way to use the default.
       if printf '%s' "$model_candidate" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._#/-]*$'; then
         MODEL_ID=$model_candidate
       else
@@ -197,12 +163,8 @@ while :; do
   esac
 done
 
-# Fail fast on a malformed MODEL header — before any git snapshot or opencode
-# invocation. Deliberately NOT a graceful degrade: falling back to the config
-# default would silently run the task on an unknown (possibly expensive) model,
-# which is worse than surfacing the typo immediately. Omit the header to use
-# the config default. Same structured-report shape as the precondition
-# failures above, so the parent's parser sees a normal failure.
+# Fail fast on a malformed MODEL header, before any snapshot or invocation —
+# same structured-report shape as the precondition failures above.
 if [ "$MODEL_HEADER_MALFORMED" -eq 1 ]; then
   cat <<'FAIL'
 ## cheap-coder result
@@ -218,28 +180,19 @@ FAIL
   exit 0
 fi
 
-# Compose the full prompt: non-negotiable git-policy prefix + the parent's task.
-# The prefix instructs opencode never to stage/commit — we want all changes left
-# as unstaged modifications so the parent can review the diff before deciding
-# what to commit. Trust-based enforcement (no post-check); opencode follows
-# explicit instructions reliably and the parent will see any violations in the
-# resulting git state regardless.
+# Prompt = git-policy prefix + task. The prefix keeps all changes unstaged so
+# the parent can review them; violations would be visible in the git state
+# regardless (trust-based, no post-check).
 FULL_TASK="IMPORTANT — git policy: Do NOT run 'git add', 'git commit', 'git stash', or any other command that modifies the git index or refs. Leave all your changes as unstaged modifications in the working tree. The parent agent will review the diff and decide what to commit.
 
 Your task:
 ${PARENT_TASK}"
 
-# 15-minute wall-clock timeout to prevent hanging opencode runs from blocking
-# the parent forever. The `timeout` binary is tricky cross-platform:
-#   - Linux:        /usr/bin/timeout (GNU coreutils) — what we want
-#   - macOS:        no `timeout` by default; GNU version installs as `gtimeout`
-#                   from Homebrew coreutils
-#   - Git Bash:     ships GNU `timeout`, BUT PATH often resolves first to
-#                   C:\Windows\System32\timeout.exe — a completely different
-#                   utility that waits for a keypress and does NOT run commands.
-#                   Using it would silently break us.
-# Strategy: probe candidates and require GNU coreutils signature in --version
-# output. If nothing qualifies, run opencode unprotected with a warning.
+# 15-minute wall-clock limit for hanging runs. GNU `timeout` only: macOS
+# needs Homebrew's `gtimeout`, and Git Bash's PATH often resolves to Windows
+# timeout.exe first — a different utility that waits for a keypress. Require
+# the GNU coreutils signature in --version; run unprotected with a warning
+# if nothing qualifies.
 TIMEOUT_CMD=""
 for candidate in timeout gtimeout; do
   if command -v "$candidate" >/dev/null 2>&1; then
@@ -253,62 +206,30 @@ if [ -z "$TIMEOUT_CMD" ]; then
   echo "WARN: GNU timeout/gtimeout not found; opencode will run without a wall-clock limit" >&2
 fi
 
-# Per-invocation permission policy, scoped to this ONE run via an inline
-# config env var — it does not touch the user's opencode.json.
-#
-# v2 mechanics (verified against opencode v2.0.10):
-#   - The v1 `OPENCODE_PERMISSION` env var is GONE in v2 (the string no longer
-#     exists in the binary; it is silently ignored).
-#   - `OPENCODE_CONFIG_CONTENT` (inline JSON config) still exists and is the
-#     highest-precedence config source — but only a server started for THIS
-#     invocation reads it. The default run mode connects to a shared
-#     background service whose config was loaded when IT started, so the env
-#     var would be silently dropped — hence `--standalone` below, which
-#     spawns a private server per run that honors it.
-#   - Key names: the installed binary's schema still uses the v1-shaped
-#     `permission` object (`bash`, `task`, `question`, `external_directory`,
-#     `skill`…) — the newer `permissions` rules array documented on the
-#     website is NOT accepted by this build. We target the binary.
-# Policy (unchanged from v1): everything not denied uses opencode's permissive
-# defaults (allow), and we deny external_directory (sandbox escape), question
-# (no human to answer in non-interactive mode), and task/skill (cheap-coder
-# runs one task, doesn't spawn its own agents).
+# Per-invocation permission policy via inline config — does not touch the
+# user's opencode.json. v2 mechanics (verified on v2.0.10):
+#   - `OPENCODE_PERMISSION` (v1) no longer exists in the binary.
+#   - `OPENCODE_CONFIG_CONTENT` is only read by a server started for this
+#     invocation; the default background service loads its config once at
+#     startup and ignores it — hence `--standalone` below, which also
+#     isolates this run from concurrent sessions.
+#   - Key names follow the binary's schema (v1-shaped `permission` object);
+#     the newer `permissions` rules array is not accepted by this build.
+# Denies: external_directory (sandbox escape), question (no human to answer
+# non-interactively), task/skill (one task, no nested agents). Everything not
+# denied keeps opencode's allow-by-default behavior.
 
-# Run opencode. Key choices:
-#   - OPENCODE_CONFIG_CONTENT (env var): inline permission config scoped to
-#     this ONE invocation (see the policy comment above).
-#   - --standalone: run with a private server instead of the background
-#     service — REQUIRED for the inline config above to take effect (the
-#     background service ignores per-invocation config). It also isolates
-#     this run from any concurrently running opencode sessions.
-#   - No --dir: the flag was removed in opencode v2; the CLI uses its own cwd,
-#     which the script has already cd'd to the git root.
-#   - --format json: emits JSONL event stream — one event per line. Stdout
-#     redirected to a file so the raw transcript never enters the agent's
-#     context. Stderr captured separately for diagnostics.
-#   - --session: passed ONLY when the parent supplied a valid RESUME-SESSION
-#     header (parsed above). `${RESUME_SESSION_ID:+--session $RESUME_SESSION_ID}`
-#     expands to nothing when empty, preserving the fresh-session default exactly.
-#   - --model: passed ONLY when the parent supplied a valid MODEL header. Same
-#     `${VAR:+...}` pattern — without a header, model selection comes from the
-#     user's opencode config, exactly as before. (A malformed header never
-#     reaches this line: it fails fast right after the header parse.)
-# `${TIMEOUT_CMD:+$TIMEOUT_CMD 900}` expands to `timeout 900` if probe succeeded,
-# nothing otherwise.
+# Stdout is the JSONL event stream, redirected to a file so the raw transcript
+# never enters the agent's context; stderr is captured separately.
+# `--session`/`--model` expand to nothing when the corresponding header is
+# absent; `${TIMEOUT_CMD:+...}` expands to `timeout 900` only when the probe
+# succeeded.
 #
-# Two defensive measures for non-interactive use, both no-ops in a normal terminal:
-#
-#  1. Drop any inherited http(s)_proxy. Some environments (a sandbox / network-
-#     mediation layer) inject http_proxy/https_proxy; opencode honors them and routes
-#     its backend API calls through that proxy, which can stall for minutes even when
-#     direct egress works fine. Unsetting talks to the backend directly.
-#  2. Redirect opencode's stdin from /dev/null. The task is already captured (as the
-#     argument or via the stdin read above), so opencode needs no stdin of its own —
-#     and an inherited non-TTY stdin (which the subagent's Bash call hands down) can
-#     otherwise make it block waiting on input that never arrives.
-#
-# Both are pure no-ops in a normal interactive shell with no proxy, so they are safe
-# everywhere.
+# Defensive no-ops for non-interactive shells (both harmless in a terminal):
+#   - unset inherited http(s)_proxy: injected proxy env vars can stall
+#     opencode's backend calls even when direct egress works.
+#   - stdin from /dev/null: the task is already captured; an inherited
+#     non-TTY stdin can make opencode block on input that never arrives.
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 OPENCODE_CONFIG_CONTENT='{"permission":{"external_directory":"deny","question":"deny","task":"deny","skill":"deny"}}' \
 ${TIMEOUT_CMD:+$TIMEOUT_CMD 900} \
@@ -324,14 +245,10 @@ exit_code=$?
 
 # ---- Step 3: extract minimal summary ----
 
-# Each extraction below uses `jq` (or similar) to write a small bounded file.
-# We never `cat` the raw jsonl — it can be huge. Each output file is what we
-# eventually read into the summary.
+# Extract bounded artifacts; the raw JSONL is never printed (it can be huge).
 
-# Pre-create all the scratch files we'll read from below. The counters use
-# `wc -l < file` which complains noisily to bash's stderr if the file does
-# not exist (the redirection failure bypasses wc's own 2>/dev/null). The
-# extractors below may not write some files (e.g. no error events).
+# Pre-create scratch files: `wc -l < file` errors loudly if a file is missing,
+# and some extractors may skip writing (e.g. no error events).
 : > "$CC_TMP/summary.txt"
 : > "$CC_TMP/errors.txt"
 : > "$CC_TMP/changed.txt"
@@ -339,22 +256,17 @@ exit_code=$?
 : > "$CC_TMP/diffstat.txt"
 : > "$CC_TMP/new_untracked.txt"
 
-# 3a. Final assistant text (opencode's own summary, last `text` event).
-#     Strategy: find the LAST JSONL line containing `"type":"text"`, then
-#     extract `.part.text` from that single line. This is safer than
-#     `jq | tail -n 1` because jq's raw output for a string containing
-#     embedded newlines is multi-line — `tail -n 1` would then take only
-#     the last LINE of the summary, silently truncating multi-line content.
-#     `grep ... | tail -n 1` operates on JSONL lines (one event per line),
-#     which is the right granularity.
+# 3a. Final assistant text: take the LAST JSONL line containing `"type":"text"`
+# and extract `.part.text` from that line. (jq's raw output for a multi-line
+# string is multi-line, so `jq | tail -n 1` would truncate to the last physical
+# line; grepping JSONL lines first keeps `tail` line-granular.)
 LAST_TEXT_LINE=$(grep '"type":"text"' "$CC_TMP/opencode.jsonl" 2>/dev/null | tail -n 1)
 if [ -n "$LAST_TEXT_LINE" ]; then
   printf '%s\n' "$LAST_TEXT_LINE" | jq -r '.part.text' > "$CC_TMP/summary.txt" 2>/dev/null
 fi
 
-# Fallback: more permissive filter that doesn't pin the event-type discriminator.
-# Handles schema drift where the `type` field is renamed/missing but `part.text`
-# still exists. Take the last JSONL line that has any `.part.text` content.
+# Fallback for schema drift (event type renamed/missing but `part.text`
+# still present): last JSONL line with any `.part.text` content.
 if [ ! -s "$CC_TMP/summary.txt" ]; then
   LAST_PART_LINE=$(grep '"part"' "$CC_TMP/opencode.jsonl" 2>/dev/null | tail -n 1)
   if [ -n "$LAST_PART_LINE" ]; then
@@ -362,99 +274,69 @@ if [ ! -s "$CC_TMP/summary.txt" ]; then
   fi
 fi
 
-# Cap summary at 8KB — the diff is the authoritative artifact, the summary
-# is just a hint. Lossy truncation is acceptable.
+# Cap at 8KB — the diff is the authoritative artifact; the summary is a hint.
 if [ "$(wc -c < "$CC_TMP/summary.txt" 2>/dev/null || echo 0)" -gt 8192 ]; then
   head -c 8192 "$CC_TMP/summary.txt" > "$CC_TMP/summary.txt.tmp"
   printf "\n[...truncated at 8KB; see diff for full picture]" >> "$CC_TMP/summary.txt.tmp"
   mv "$CC_TMP/summary.txt.tmp" "$CC_TMP/summary.txt"
 fi
 
-# 3a-bis. Capture opencode's session id. Every JSONL event carries it as
-#     "sessionID":"ses_<base62>" at the top level; we only need the first hit.
-#     The parent reuses this to resume the conversation via a RESUME-SESSION:
-#     header on a follow-up delegation. grep-then-sed (not jq) because the value
-#     is a fixed-shape token and this avoids any event-type discrimination.
+# 3a-bis. Session id: every event carries "sessionID" at the top level; first
+# hit. Surfaced so the parent can resume this conversation via a
+# RESUME-SESSION header. grep+sed; the value is a fixed-shape token.
 SESSION_ID=$(grep -m1 -o '"sessionID":"ses_[A-Za-z0-9]*"' "$CC_TMP/opencode.jsonl" 2>/dev/null | head -n 1 | sed 's/.*"ses_/ses_/; s/"$//')
 
-# 3b. Error events from the stream (separate from exit code; opencode can
-#     emit errors without aborting).
-#     Shape evolved across versions: v1 used `.error.name` +
-#     `.error.data.message`; v2 (verified 2.0.10) uses `.error.type` +
-#     `.error.message` (e.g. provider.internal: Internal server error).
-#     `//`-fallbacks cover both so neither schema reports "null: no message".
+# 3b. Error events (opencode can error without aborting). The event shape
+# changed in v2 — `.error.type`/`.error.message` vs v1 `.error.name`/
+# `.error.data.message`; the `//` fallbacks cover both.
 jq -r 'select(.type=="error") | "\(.error.name // .error.type // "unknown"): \(.error.data.message // .error.message // "no message")"' "$CC_TMP/opencode.jsonl" 2>/dev/null > "$CC_TMP/errors.txt"
 
-# 3c. Files opencode changed. We derive from git, not from parsing tool_use
-#     events, because the field name for paths inside `part.state.input`
-#     varies by tool (filePath, path, file, etc. — undocumented). Git is
-#     authoritative and schema-version-independent.
-#     Same `-z | tr | sort` pipeline as prestate so the two files have
-#     identical ordering and unquoted paths — required for `comm` to work
-#     correctly. LC_ALL=C pins byte-wise sort, locale-independent.
+# 3c. Changed files, derived from git rather than tool_use events (path field
+# names inside `part.state.input` vary by tool). Same -z|tr|sort pipeline and
+# LC_ALL=C as prestate so `comm` ordering matches.
 LC_ALL=C git status --porcelain -uall -z | tr '\0' '\n' | LC_ALL=C sort > "$CC_TMP/poststate.txt"
 comm -13 "$CC_TMP/prestate.txt" "$CC_TMP/poststate.txt" > "$CC_TMP/changed.txt"
 
-# 3d. Diff stat and size. Plain `git diff` only covers tracked-file
-#     modifications — it ignores untracked files entirely. Since cheap-coder
-#     is heavily used for greenfield work (new modules, new tests, new docs),
-#     we must explicitly synthesize diffs for untracked files too, or the
-#     parent's report would be misleadingly empty for the most common case.
-#
-#     Strategy: tracked diff via `git diff`, then append a `git diff --no-index`
-#     against /dev/null for each untracked file that is *new since prestate*.
-#     Critical: we drive the untracked-file list from `changed.txt` (the
-#     `comm -13` delta of porcelain status), NOT from `git ls-files --others`.
-#     The latter returns ALL current untracked files, including any scratch
-#     files the parent had lying around before delegating — those would
-#     pollute the diff and be wrongly attributed to opencode. The `??`-coded
-#     entries in `changed.txt` are by construction "untracked AND new since
-#     prestate", which is exactly what we want.
+# 3d. Diff. Plain `git diff` ignores untracked files, so synthesize a /dev/null
+# diff for each untracked file that is new since prestate. The list comes from
+# changed.txt (the porcelain delta), NOT `git ls-files --others` — the latter
+# also returns pre-existing parent scratch files, which would be misattributed
+# to opencode.
 git diff > "$CC_TMP/diff.txt" 2>/dev/null
-# Extract paths for newly-untracked files from the delta. Each `changed.txt`
-# line is `XY path` with XY being the porcelain status (here `??` for
-# untracked). awk strips the 3-char prefix to recover the path.
+# changed.txt lines are `XY path`; strip the 3-char prefix.
 awk '/^\?\? / { print substr($0, 4) }' "$CC_TMP/changed.txt" > "$CC_TMP/new_untracked.txt"
-# Synthesize a diff for each new untracked file. `--no-index` exits non-zero
-# when files differ (always vs /dev/null), so we tolerate that with `|| true`.
+# `--no-index` exits non-zero when files differ; tolerate it.
 while IFS= read -r untracked; do
   [ -z "$untracked" ] && continue
   git diff --no-index --no-color /dev/null "$untracked" >> "$CC_TMP/diff.txt" 2>/dev/null || true
 done < "$CC_TMP/new_untracked.txt"
-# Stat derived from the combined diff via `git apply --stat` (works on diff
-# text rather than re-running git diff, so it counts untracked additions).
-# Fall back to plain `git diff --stat` if `git apply --stat` rejects the
-# synthesized hunks. The most common cause of the fallback is binary
-# untracked files: `git diff --no-index /dev/null binary` emits "Binary
-# files ... differ" which `git apply --stat` cannot parse. Track whether
-# the fallback was taken so we can warn the parent that the diff stat
-# may not reflect untracked additions.
+# Stat from the combined diff via `git apply --stat` so untracked additions
+# count. Falls back to `git diff --stat` when `git apply --stat` rejects the
+# synthesized hunks (typically a binary untracked file). The fallback is
+# flagged so the parent can be warned the stat omits untracked additions.
 stat_fallback=0
 if ! git apply --stat "$CC_TMP/diff.txt" > "$CC_TMP/diffstat.txt" 2>/dev/null; then
   git diff --stat > "$CC_TMP/diffstat.txt" 2>/dev/null
   stat_fallback=1
 fi
-# Counters: use `wc -l` rather than `grep -c .`. The latter exits 1 when
-# the file has zero matching lines and emits "0", so `grep -c . file ||
-# echo 0` captures BOTH outputs and produces a multi-line "0\n0" string
-# that breaks the arithmetic comparison `[ "$x" -gt 0 ]` later. `wc -l`
-# always exits 0 and emits a single integer. Safe because our porcelain
-# captures always terminate every record with a newline.
+# Counters via `wc -l`, not `grep -c .`: the latter exits 1 on zero matches
+# and makes `grep -c . file || echo 0` produce a multi-line string that breaks
+# `[ "$x" -gt 0 ]`. The porcelain captures always end records with a newline,
+# so `wc -l` counts are exact.
 diff_lines=$(wc -l < "$CC_TMP/diff.txt" 2>/dev/null || echo 0)
 diff_lines=${diff_lines:-0}
 new_untracked_count=$(wc -l < "$CC_TMP/new_untracked.txt" 2>/dev/null || echo 0)
 new_untracked_count=${new_untracked_count:-0}
 
-# 3e. Decide whether to include diff content in the response. Cap at 500 lines
-#     to keep the parent's context bounded — for larger diffs, the parent runs
-#     `git diff` directly.
+# 3e. Include the diff content only below 500 lines, to bound the parent's
+#     context; larger diffs are fetched via `git diff`.
 include_diff=0
 if [ "$diff_lines" -gt 0 ] && [ "$diff_lines" -lt 500 ]; then
   include_diff=1
 fi
 
-# 3f. Anomaly detection — defensive defaults so empty files don't break the
-#     arithmetic comparison ([ "" -gt 0 ] is a syntax error in bash).
+# 3f. Anomaly detection. Defaults keep the `[ "$x" -gt 0 ]` arithmetic safe
+#     when a file is empty.
 summary_size=$(wc -c < "$CC_TMP/summary.txt" 2>/dev/null || echo 0)
 summary_size=${summary_size:-0}
 changed_count=$(wc -l < "$CC_TMP/changed.txt" 2>/dev/null || echo 0)
@@ -464,92 +346,74 @@ jsonl_size=${jsonl_size:-0}
 
 WARNINGS=""
 
-# Anomaly 1: opencode changed files but produced no final assistant text.
-# Likely a crash mid-output or schema mismatch.
+# Anomaly 1: files changed but no final assistant text — likely a crash
+# mid-output or a schema mismatch.
 if [ "$summary_size" -eq 0 ] && [ "$changed_count" -gt 0 ]; then
   WARNINGS="${WARNINGS}opencode changed files but produced no final summary text — possible crash or schema mismatch; review the diff carefully. "
 fi
 
-# Anomaly 2: opencode produced almost nothing at all (event stream <100 bytes).
-# Distinguishes "ran successfully but did nothing visible" (ambiguous) from
-# normal success.
+# Anomaly 2: near-empty event stream (<100 bytes) with a zero exit code —
+# ambiguous "ran but did nothing visible".
 if [ "$jsonl_size" -lt 100 ] && [ "$exit_code" -eq 0 ]; then
   WARNINGS="${WARNINGS}opencode produced unusually small output stream (<100 bytes) — verify the task was understood. "
 fi
 
-# Anomaly 3: opencode hit the wall-clock timeout (only possible when GNU
-# timeout was active). Exit 124 = killed by timeout.
+# Anomaly 3: wall-clock timeout (exit 124; only possible when GNU timeout ran).
 if [ "$exit_code" -eq 124 ]; then
   WARNINGS="${WARNINGS}opencode exceeded 15-minute wall-clock timeout and was killed. "
 fi
 
-# Anomaly 4: error events present in stream.
+# Anomaly 4: error events present.
 if [ -s "$CC_TMP/errors.txt" ]; then
   err_preview=$(head -c 500 "$CC_TMP/errors.txt" | tr '\n' '; ')
   WARNINGS="${WARNINGS}error events from opencode: ${err_preview}. "
 fi
 
-# Anomaly 5: non-zero exit code (other than the timeout case already handled).
+# Anomaly 5: non-zero exit code other than the timeout case above.
 if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
   stderr_preview=$(tail -c 500 "$CC_TMP/opencode.err" 2>/dev/null | tr '\n' '; ')
   WARNINGS="${WARNINGS}opencode exited non-zero (code $exit_code): ${stderr_preview}. "
 fi
 
-# Anomaly 6: git index mutated during the opencode run. Compare the index
-# tree hash captured before opencode ran against a fresh hash now. If they
-# differ, opencode disobeyed the no-staging policy (or something else
-# modified the index concurrently). Plain `git diff` hides staged changes,
-# so without this signal the parent could silently miss work.
+# Anomaly 6: index mutated during the run — opencode may have staged changes
+# despite the no-staging policy. Plain `git diff` hides staged changes.
 POST_INDEX_TREE=$(git write-tree 2>/dev/null)
 if [ -n "$PRE_INDEX_TREE" ] && [ -n "$POST_INDEX_TREE" ] && [ "$PRE_INDEX_TREE" != "$POST_INDEX_TREE" ]; then
   WARNINGS="${WARNINGS}git index changed during opencode run — opencode may have staged changes despite the no-staging policy; inspect with 'git diff --cached'. "
 fi
 
-# Anomaly 7: `git apply --stat` rejected the combined diff and we fell back
-# to tracked-only stat. Most likely cause: a binary untracked file produced
-# a "Binary files ... differ" line that `git apply --stat` cannot parse.
-# When this happens alongside new untracked files, the reported diff stat
-# does NOT include those untracked additions — warn the parent.
+# Anomaly 7: diff-stat fallback with new untracked files — the reported stat
+# omits untracked additions (typically a binary untracked file).
 if [ "$stat_fallback" -eq 1 ] && [ "$new_untracked_count" -gt 0 ]; then
   WARNINGS="${WARNINGS}diff stat fell back to tracked-only — likely a binary untracked file; the 'Diff size' below does not count untracked additions. Inspect the listed '??' files directly. "
 fi
 
-# Caveat about the comm-based file list: if the parent had pre-existing
-# uncommitted changes to a file (e.g. ` M foo.ts` in prestate) and opencode
-# also modified that file, the porcelain status line is unchanged between
-# prestate and poststate. `comm -13` then misses the overlap and the file
-# does not appear in "Files changed" — though the actual diff content
-# (git diff) still shows opencode's modifications correctly. Documented
-# rather than fixed: the simplest mitigation is for the parent to commit
-# or stash before delegating to a dirty tree.
+# Dirty-tree caveat: if the parent had pre-existing edits to a file opencode
+# also modified, the porcelain status is unchanged between prestate and
+# poststate, so `comm -13` misses the overlap from "Files changed" (the diff
+# content is still correct). Mitigation: stage or commit before delegating.
 if [ -s "$CC_TMP/prestate.txt" ]; then
   WARNINGS="${WARNINGS}parent had pre-existing uncommitted changes — this report cannot reliably attribute overlapping file edits to opencode; review the full working tree diff carefully. "
 fi
 
-# Anomaly 8: the parent supplied a RESUME-SESSION: header but the id was not a
-# valid `ses_<base62>` token. We ran a FRESH session (no --session) rather than
-# fail, so the parent still gets a result — but flag it so they can fix the id
-# and re-delegate to actually resume.
+# Anomaly 8: malformed RESUME-SESSION id — ran a fresh session instead;
+# flagged so the parent can fix the id and re-delegate.
 if [ "$RESUME_HEADER_MALFORMED" -eq 1 ]; then
   WARNINGS="${WARNINGS}RESUME-SESSION header was present but the session id was malformed (expected 'ses_' followed by letters/digits) — ran a fresh session instead of resuming. "
 fi
 
-# Anomaly 9: provider.internal error events with NO model override in play.
-# This is the signature of a broken config default model (e.g. a model id
-# that opencode has rotated/removed — the stream spins on step_start events
-# then dies with provider.internal 500, verified against v2.0.10). When a
-# MODEL header was supplied, the failure is on the explicitly-pinned model
-# and the parent already knows which id to fix — no extra hint needed.
+# Anomaly 9: provider.internal errors with no MODEL header — the signature of
+# a broken config default model (spinning step_start events, then a 500).
+# With a MODEL header the parent already knows which id to fix.
 if [ -z "$MODEL_ID" ] && grep -q 'provider\.internal' "$CC_TMP/errors.txt" 2>/dev/null; then
   WARNINGS="${WARNINGS}provider.internal error with no MODEL header — the opencode config default model may be invalid/rotated; set a working default ('opencode models' to list) or prepend a 'MODEL: provider/model' header. "
 fi
 
 # ---- Step 4: status rubric ----
 #
-# success: exit code 0 AND no error events
-# partial: exit code 0 BUT error events present (opencode reported issues
-#          while continuing — task may be incomplete)
-# failure: exit code non-zero
+# success: exit 0, no error events
+# partial: exit 0 but error events present — task may be incomplete
+# failure: non-zero exit
 if [ "$exit_code" -ne 0 ]; then
   STATUS="failure"
 elif [ -s "$CC_TMP/errors.txt" ]; then
@@ -558,29 +422,22 @@ else
   STATUS="success"
 fi
 
-# ---- Step 5: emit structured summary to stdout ----
-# This is the entire return value to the parent. Format is fixed so the
-# parent can parse it deterministically.
+# ---- Step 5: emit structured summary ----
+# The entire return value to the parent; fixed format for deterministic parsing.
 
-# Diff stat one-liner (e.g. "3 files changed, +42/-15 lines"). Falls back
-# to "0 files, +0/-0 lines" when diff is empty.
+# Diff stat one-liner; "0 files, +0/-0 lines" when empty.
 if [ -s "$CC_TMP/diffstat.txt" ]; then
   DIFFSTAT_LINE=$(tail -n 1 "$CC_TMP/diffstat.txt")
-  # `git apply --stat` / `git diff --stat` summary lines start with a leading
-  # space (e.g. " 2 files changed, 204 insertions(+)"). Trim it so the rendered
-  # "**Diff size:** N files…" has no double space. Pure bash param expansion
-  # (no sed) for cross-platform parity.
+  # Summary lines start with a leading space; trim it via bash parameter
+  # expansion (no sed) for cross-platform parity.
   DIFFSTAT_LINE="${DIFFSTAT_LINE#"${DIFFSTAT_LINE%%[![:space:]]*}"}"
 else
   DIFFSTAT_LINE="0 files, +0/-0 lines"
 fi
 
-# Format changed-files list. Each porcelain line is `XY path` where XY is
-# the 2-char status code (M = modified, A = added, ?? = untracked, etc.).
-# Renames (R) and copies (C) emit TWO records under `-z`: first the new
-# path with the status code, then the old/source path with no status.
-# The `skip_next` flag swallows that second record so we don't list it
-# as a phantom unchanged entry.
+# Changed-files list. Porcelain lines are `XY path`. Renames (R) and copies
+# (C) emit two records under `-z` (new path with status, then source path
+# without); skip_next swallows the second so it isn't listed as a phantom.
 if [ -s "$CC_TMP/changed.txt" ]; then
   FILES_BLOCK=$(awk '
     {
@@ -595,8 +452,7 @@ else
   FILES_BLOCK="- none"
 fi
 
-# Summary text — fall back to a placeholder if empty so the parent's
-# template parser doesn't see a stray blank line.
+# Summary placeholder when empty, so the parent's parser sees no stray blank line.
 if [ -s "$CC_TMP/summary.txt" ]; then
   SUMMARY_TEXT=$(cat "$CC_TMP/summary.txt")
 else
@@ -608,10 +464,8 @@ if [ -z "$WARNINGS" ]; then
   WARNINGS="none"
 fi
 
-# Print the structured block. Parent will copy this verbatim.
-# Multi-line summaries (paragraphs, markdown lists) are emitted as a fenced
-# block on their own so the structured `**Field:**` shape stays parseable.
-# Single-line summaries stay inline for readability.
+# Emit the fixed-format block. Multi-line summaries are fenced so the
+# `**Field:**` shape stays parseable.
 echo "## cheap-coder result"
 echo ""
 echo "**Status:** $STATUS"
@@ -639,9 +493,7 @@ else
   fi
 fi
 echo "**Warnings:** $WARNINGS"
-# Surface the session id (when captured) so the parent can iterate on this exact
-# opencode conversation. Emitted regardless of status — even a failed/partial run
-# is worth resuming. Placed near the end where the parent's eye lands.
+# Session id (when captured) — surfaced for resuming, regardless of status.
 if [ -n "$SESSION_ID" ]; then
   echo "**Session ID:** $SESSION_ID"
   echo "**Resume with:** prepend 'RESUME-SESSION: $SESSION_ID' (then a blank line) to a follow-up task to continue this opencode conversation"
@@ -659,5 +511,5 @@ if [ "$include_diff" -eq 1 ]; then
   echo '```'
 fi
 
-# EXIT trap will now clean up $CC_TMP automatically.
+# The EXIT trap cleans up $CC_TMP.
 exit 0

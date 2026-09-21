@@ -1,9 +1,8 @@
-# Case 07 (defensive — binary untracked stat fallback): opencode creates an untracked binary file. The script
-# must not crash, the file must appear in the changed list, and the diff
-# preview should indicate the binary content (via "Binary files ... differ").
-# `git apply --stat` accepts binary diffs on modern Git (2.30+), so the
-# stat-fallback warning may not fire — that's fine. The stat-fallback handling
-# is defensive for older/stricter Git versions where the fallback path activates.
+# Case 07 (defensive — binary untracked stat fallback): an untracked binary
+# file must not crash the engine and must appear in the changed list and diff
+# preview. `git apply --stat` accepts binary diffs on modern Git (2.30+), so
+# the stat-fallback path mainly exists for older Git; whether the fallback
+# warning fires here is not asserted.
 
 TASK="add a binary asset"
 

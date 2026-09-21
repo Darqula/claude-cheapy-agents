@@ -1,7 +1,7 @@
-# Case 03 (regression — collapsed untracked dir): opencode creates a new directory with multiple
-# files in it. Plain `git status --porcelain` would collapse this to
-# `?? src/new-module/`, hiding the individual files. We need each file
-# to appear separately AND each file's content to be in the diff.
+# Case 03 (regression — collapsed untracked dir): opencode creates a new
+# directory with multiple files. Plain `git status --porcelain` would collapse
+# it to `?? src/new-module/`; each file must be listed separately and appear
+# in the diff.
 
 TASK="create src/new-module/ with two files"
 

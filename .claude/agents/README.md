@@ -34,13 +34,13 @@ The host then reviews the diff and decides whether to commit.
 
 **No staging, no committing.** opencode is instructed via a non-negotiable prefix on every task: leave all changes as unstaged modifications. The host reviews the unstaged diff and decides what to commit.
 
-**Trust but track.** opencode's exit code, error events, and diff are all surfaced to the host. The host can see if opencode produced unusually small output, if error events were emitted, if a wall-clock timeout fired, or if a no-staging violation occurred.
+**Trust but track.** opencode's exit code, error events, and diff are all surfaced to the host as warnings: unusually small output, error events, wall-clock timeout, no-staging violations, or a broken default model.
 
 **Cross-platform bash.** Works on Linux, macOS, and Git Bash on Windows. Notable details: `mktemp -d` with no flags (the `-t` flag has divergent semantics across platforms), GNU `timeout` probing that rejects Windows's decoy `timeout.exe`, `LC_ALL=C` on sorts so `comm` is locale-stable, `git status --porcelain -z | tr` to handle paths with spaces or non-ASCII characters.
 
 ## Session resumption
 
-opencode often doesn't nail a task in one shot — it picks the wrong file, misses a test, or asks (in its summary) a question the parent could answer in a sentence. Rather than re-delegate from scratch (paying to re-establish context) or drop down to direct host work (defeating the cost saving), the parent can **resume the same opencode conversation**.
+opencode often doesn't nail a task in one shot. Rather than re-delegate from scratch or do the work directly, the parent can **resume the same opencode conversation**. The session id rides the agent's two existing channels — no new plumbing:
 
 The session id rides the agent's two existing channels — no new input/output plumbing:
 
@@ -49,10 +49,18 @@ The session id rides the agent's two existing channels — no new input/output p
 
 Two deliberate choices:
 
-- **Explicit id, never `--continue`.** opencode's `--continue` ("last session") is non-deterministic here: each cheap-coder call is an independent process, so an unrelated opencode run on the same machine between two delegations could become the "last session" we'd accidentally resume. Explicit ids are unambiguous.
-- **Malformed id degrades gracefully.** If the header is present but the id isn't a valid `ses_<base62>` token, cheap-coder runs a fresh session (no `--session`) and emits a warning, so the parent still gets a result and learns the header was wrong rather than silently losing the resume.
+- **Explicit id, never `--continue`.** `--continue` ("last session") is non-deterministic here: each cheap-coder call is an independent process, and an unrelated opencode run between two delegations could become the "last session" we'd accidentally resume.
+- **Malformed id degrades gracefully.** If the id isn't a valid `ses_<base62>` token, cheap-coder runs a fresh session and warns, so the parent still gets a result and learns the header was wrong.
 
-`--fork` is intentionally out of scope for now; it can be layered in later by parsing a second optional header.
+`--fork` is intentionally out of scope; it can be layered in later as a second optional header.
+
+## Model override
+
+By default the coding model comes from the user's opencode config. A task may pin the model for one run by prepending a `MODEL: <provider/model[#variant]>` header (composes with `RESUME-SESSION:` in either order):
+
+- No header and no `-m`/`--model` flag → config default.
+- Malformed header id → the run **fails fast** without invoking opencode: falling back to an unknown default could silently run the task on an expensive model.
+- If the config default itself is missing/rotated, opencode v2 fails with `provider.internal: Internal server error`; the report flags this and points at the header.
 
 ## Files in this folder
 
@@ -65,7 +73,7 @@ Two deliberate choices:
 
 ## Usage from another agent
 
-The host calls cheap-coder via the standard Agent tool (formerly `Task` — still accepted as an alias in current Claude Code):
+The host calls cheap-coder via the standard Agent tool:
 
 ```
 Agent(
@@ -83,8 +91,8 @@ The frontmatter description in `cheap-coder.md` documents the routing criteria (
 - **Single git repo only.** cheap-coder fails fast if invoked outside a git repo. The host needs to `git init` first if working on something un-versioned.
 - **No-staging policy is prompt-enforced, with detection.** The git-policy prefix instructs opencode never to `git add`/`git commit`/`git stash`. cheap-coder snapshots the index tree (`git write-tree`) before and after the opencode run and emits a warning if it changed — so disobedience does not go silently undetected. The prompt is still the actual enforcement; the warning just makes violations visible.
 - **Concurrent invocations are independent.** Each invocation uses its own `mktemp -d` scratch dir, so two cheap-coder calls won't clobber each other, but they will operate on the same working tree — if both modify the same file, results depend on execution order.
-- **15-minute wall-clock timeout.** Opencode runs that exceed 15 minutes are killed (when GNU timeout is available). The host receives a timeout warning and can re-delegate with a smaller task if appropriate.
-- **No opencode model override.** Opencode's coding model is selected from the user's local opencode config; cheap-coder does not pass `-m`/`--model`. (The Claude-side orchestration model is separately pinned to Haiku via `model: haiku` in the agent frontmatter, since cheap-coder itself only performs mechanical substitution and one Bash call — no judgment work that needs a bigger model.)
+- **15-minute wall-clock timeout.** Opencode runs that exceed 15 minutes are killed (when GNU timeout is available). The host receives a timeout warning and can re-delegate with a smaller task.
+- **Model override is opt-in per task.** Without a `MODEL:` header the coding model comes from the user's opencode config; with one, the exact `provider/model[#variant]` id is required and a malformed id fails the run (see "Model override" above).
 
 ## Settings / installation
 

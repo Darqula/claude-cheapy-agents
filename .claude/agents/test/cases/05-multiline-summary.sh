@@ -1,6 +1,6 @@
-# Case 05 (regression — multi-line summary truncation): opencode's final summary contains a real newline.
-# The emitter must fence multi-line summaries but keep single-line summaries
-# inline. We assert the fenced form is used here.
+# Case 05 (regression — multi-line summary truncation): a summary containing a
+# real newline must be emitted as a fenced block; single-line summaries stay
+# inline.
 
 TASK="modify src/existing.ts with a multi-line summary"
 

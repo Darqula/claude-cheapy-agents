@@ -1,6 +1,6 @@
-# Case 04 (regression — pre-existing untracked attribution): parent had an untracked scratch file before
-# delegating. opencode creates a separate new file. The pre-existing
-# scratch must NOT appear in the diff or be wrongly attributed to opencode.
+# Case 04 (regression — pre-existing untracked attribution): the parent had an
+# untracked scratch file before delegating; it must not appear in the report
+# or be attributed to opencode.
 
 TASK="create src/added.ts"
 

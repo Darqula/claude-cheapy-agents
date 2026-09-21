@@ -1,6 +1,5 @@
-# Case 10 (regression — missing cd to git root): cheap-coder script is started from a subdirectory of the
-# repo. The script must `cd $GIT_ROOT` so untracked files outside that
-# subdirectory are still discovered.
+# Case 10 (regression — missing cd to git root): the engine is invoked from a
+# subdirectory; it must still discover changes outside that subdirectory.
 
 TASK="create a file in a sibling directory"
 

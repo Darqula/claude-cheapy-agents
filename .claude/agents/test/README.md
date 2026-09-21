@@ -9,7 +9,7 @@ Runnable test suite for the [cheap-coder](../cheap-coder.md) subagent. Exercises
 .claude/agents/test/run-tests.sh 03-add-untracked-nested   # run one case
 ```
 
-A passing run prints `PASS` per case and exits 0. Failures print the assertions that failed and the path to the case's captured stdout, then exit 1.
+A passing run prints `PASS` per case and exits 0. Failures print the failed assertions and the path to the case's captured stdout, then exit 1.
 
 ## What gets tested
 
@@ -19,7 +19,7 @@ Production opencode is never invoked. Tests are deterministic and offline.
 
 ## What's under test
 
-The harness invokes the real shipped engine, [../lib/cheap-coder-run.sh](../lib/cheap-coder-run.sh), exactly as the subagent and the `/cheap` skill do — passing the task as the first argument. There is no extraction or substitution step anymore: the tests run the production script directly, so they cannot drift from what ships.
+The harness invokes the real shipped engine, [../lib/cheap-coder-run.sh](../lib/cheap-coder-run.sh), exactly as the subagent and the `/cheap` skill do — passing the task as the first argument. The tests run the production script directly, so they cannot drift from what ships.
 
 ## Fake binaries
 
@@ -31,9 +31,9 @@ The harness invokes the real shipped engine, [../lib/cheap-coder-run.sh](../lib/
 - `FAKE_OPENCODE_EXIT_CODE` — exit code to return (default: 0)
 - `FAKE_OPENCODE_EMIT_NOTHING` — if `1`, emit no JSONL events
 - `FAKE_OPENCODE_SESSION_ID` — session id stamped on every event (default: `ses_FAKE0001`)
-- `FAKE_OPENCODE_ARGV_LOG` — set by the runner (not the case) to a path where the fake records the `--session` value and the message it received; a case's `assert()` reads it via the same `$FAKE_OPENCODE_ARGV_LOG` var to verify `--session` passthrough and `RESUME-SESSION` header stripping
+- `FAKE_OPENCODE_ARGV_LOG` — set by the runner (not the case) to a path where the fake records `--session`/`--model` values, `CONFIG_SET=1` when `OPENCODE_CONFIG_CONTENT` is exported, `STANDALONE=1` when `--standalone` is passed, and the message it received; a case's `assert()` reads the same var to verify flag passthrough and header stripping
 
-`jq` is **not** faked — the tests run against the real `jq` binary, the same one cheap-coder requires in production. (A Node-based jq shim was bundled here previously so tests could run without `jq` installed; it was removed once real `jq` became a standard prerequisite.)
+`jq` is **not** faked — tests run against the real `jq` binary, the same one cheap-coder requires in production.
 
 ## Writing a new case
 
@@ -68,4 +68,4 @@ The case file is sourced inside a subshell, so cross-case state cannot leak.
 
 - bash, git, jq, node (node is used by the fake opencode to JSON-encode event text)
 
-The tests use the real `jq` binary — the same prerequisite cheap-coder enforces in production via its own precondition check.
+The tests use the real `jq` binary — the same prerequisite cheap-coder enforces in production.
