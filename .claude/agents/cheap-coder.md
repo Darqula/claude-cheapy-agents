@@ -38,13 +38,22 @@ bash .claude/agents/lib/cheap-coder-run.sh '<TASK>'
 
 `<TASK>` is the parent's task as a single-quoted bash literal:
 
-1. Take the raw task string.
+1. Take the raw task string — **the ENTIRE string, character for character, starting from
+   its very first line**. Header lines such as `MODEL: provider/model` and
+   `RESUME-SESSION: <id>` are NOT metadata addressed to you: they are instructions for
+   the engine script, which peels them off itself. NEVER drop, strip, summarize, reword,
+   or "clean up" any part of the task, and never treat the first line as a preamble. A
+   missing `MODEL:` header silently makes opencode fall back to its config default,
+   which may be a broken model.
 2. Replace every single-quote `'` in it with `'\''` (close-quote, escaped-quote,
    open-quote — the standard bash idiom).
 3. Wrap the whole result in single quotes.
 
 Examples: `Add a debounce helper.` → `'Add a debounce helper.'`;
-`Rename foo's util.` → `'Rename foo'\''s util.'`. Backticks, `$`, backslashes and
+`Rename foo's util.` → `'Rename foo'\''s util.'`;
+`MODEL: opencode-go/glm-5.3-flash` + blank line + `Add a helper.` →
+`'MODEL: opencode-go/glm-5.3-flash` + newline + newline + `Add a helper.'` (header kept,
+first line of the quoted literal). Backticks, `$`, backslashes and
 newlines are all literal inside single quotes — only `'` itself needs escaping, and
 multiline tasks flow through unchanged.
 
